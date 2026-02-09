@@ -211,25 +211,29 @@ async def get_latest_orders(limit: int = 20):
 
 
 @app.get("/api/debug/test-sort")
-async def debug_test_sort(sort_param: str = ""):
+async def debug_test_sort(sort_param: str = "", base: str = ""):
     """Test verschillende sort parameters direct op de Goedgepickt API."""
     try:
         client = get_client()
         import httpx
         
-        # Bouw params handmatig
-        url = f"{client.BASE_URL}/orders?perPage=3"
+        # Probeer fulfilment API als base=fulfilment
+        if base == "fulfilment":
+            api_url = "https://account.goedgepickt.nl/api/fulfilment/v1/orders?perPage=3"
+        else:
+            api_url = f"{client.BASE_URL}/orders?perPage=3"
+        
         if sort_param:
-            url += f"&{sort_param}"
+            api_url += f"&{sort_param}"
         
         async with httpx.AsyncClient() as http:
-            resp = await http.get(url, headers=client.headers, timeout=30.0)
+            resp = await http.get(api_url, headers=client.headers, timeout=30.0)
             data = resp.json()
         
         items = data.get("items", [])
         page_info = data.get("pageInfo", {})
-        compact = [{"date": o.get("createDate","")[:16], "id": o.get("externalDisplayId",""), "status": o.get("status","")} for o in items]
-        return {"sort_param": sort_param, "pageInfo": page_info, "items": compact}
+        compact = [{"date": o.get("createDate", o.get("createdAt",""))[:16], "id": o.get("externalDisplayId", o.get("orderId","")), "status": o.get("status",""), "webshop": o.get("webshopName","")} for o in items]
+        return {"url_used": api_url, "status": resp.status_code, "pageInfo": page_info, "items": compact, "raw_keys": list(items[0].keys()) if items else []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
