@@ -163,16 +163,48 @@ async def get_orders(
 
 @app.get("/api/orders/latest")
 async def get_latest_orders(limit: int = 20):
-    """Haal de nieuwste orders op (automatisch laatste pagina)."""
+    """Haal de nieuwste orders op via cursor-based pagination."""
     try:
         client = get_client()
-        orders = await client.get_latest_orders(limit=limit)
-        pagination = getattr(client, '_last_pagination', {})
+        
+        # Stap 1: Haal pagina 200 op om de cursor te krijgen
+        result = await client._request("GET", "/orders", params={
+            "perPage": 50,
+            "page": 200
+        })
+        cursor = result.get("pageInfo", {}).get("cursor")
+        
+        if not cursor:
+            # Fallback: gewoon laatste beschikbare pagina
+            items = result.get("items", [])
+            items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+            return {"success": True, "count": len(items), "data": items[:limit]}
+        
+        # Stap 2: Gebruik cursor om verder te pagineren naar het einde
+        # Probeer steeds de max pagina met cursor
+        latest_items = []
+        for _ in range(50):  # max 50 pogingen
+            try:
+                result = await client._request("GET", "/orders", params={
+                    "perPage": 50,
+                    "cursor": cursor
+                })
+                items = result.get("items", [])
+                if not items:
+                    break
+                latest_items = items  # Bewaar steeds de laatste batch
+                new_cursor = result.get("pageInfo", {}).get("cursor")
+                if not new_cursor or new_cursor == cursor:
+                    break
+                cursor = new_cursor
+            except:
+                break
+        
+        latest_items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
         return {
             "success": True,
-            "count": len(orders),
-            "pagination": pagination,
-            "data": orders
+            "count": len(latest_items),
+            "data": latest_items[:limit]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
