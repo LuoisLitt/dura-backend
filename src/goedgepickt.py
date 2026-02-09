@@ -221,12 +221,21 @@ class GoedgepicktAPI:
         orders_today_count = today_info.get("totalItems", 0)
         orders_week_count = week_info.get("totalItems", 0)
         
-        # Recente orders voor status verdeling
-        recent_orders = await self.get_latest_orders(limit=50)
+        # Status verdeling: tel over ALLE orders van vandaag (niet alleen 50)
         orders_by_status = {}
-        for order in recent_orders:
-            status = order.get("status", "unknown")
-            orders_by_status[status] = orders_by_status.get(status, 0) + 1
+        page = 1
+        max_pages = 20  # safety limit
+        while page <= max_pages:
+            items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
+            if not items:
+                break
+            for order in items:
+                status = order.get("status", "unknown")
+                orders_by_status[status] = orders_by_status.get(status, 0) + 1
+            last_page = pg_info.get("lastPage", 1)
+            if page >= last_page:
+                break
+            page += 1
         
         # Shipments deze week
         _, ship_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
