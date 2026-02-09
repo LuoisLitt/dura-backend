@@ -46,7 +46,8 @@ class GoedgepicktAPI:
         status: Optional[str] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 100,
+        page: int = 1
     ) -> list:
         """
         Haal orders op.
@@ -56,6 +57,7 @@ class GoedgepicktAPI:
         params = {
             "webshopUuid": self.webshop_id,
             "perPage": limit,
+            "page": page,
             "sort[0][field]": "createdAt",
             "sort[0][direction]": "desc"
         }

@@ -120,6 +120,7 @@ async def get_orders(
     status: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    page: int = 1,
     limit: int = 100
 ):
     """Haal orders op met optionele filters."""
@@ -133,12 +134,14 @@ async def get_orders(
             status=status,
             date_from=df,
             date_to=dt,
-            limit=limit
+            limit=limit,
+            page=page
         )
         
         return {
             "success": True,
             "count": len(orders),
+            "page": page,
             "data": orders
         }
     except Exception as e:
