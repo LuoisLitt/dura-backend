@@ -167,11 +167,31 @@ async def get_latest_orders(limit: int = 20):
     try:
         client = get_client()
         orders = await client.get_latest_orders(limit=limit)
+        pagination = getattr(client, '_last_pagination', {})
         return {
             "success": True,
             "count": len(orders),
+            "pagination": pagination,
             "data": orders
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/debug/raw-orders")
+async def debug_raw_orders():
+    """Debug: toon ruwe API response van Goedgepickt."""
+    try:
+        client = get_client()
+        result = await client._request("GET", "/orders", params={
+            "webshopUuid": client.webshop_id,
+            "perPage": 1,
+            "page": 1
+        })
+        # Return alle keys behalve items (te groot)
+        keys = {k: v for k, v in result.items() if k != "items"}
+        keys["items_count"] = len(result.get("items", []))
+        return keys
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
