@@ -82,9 +82,41 @@ class GoedgepicktAPI:
         
         result = await self._request("GET", "/orders", params=params)
         items = result.get("items", [])
+        # Sla pagination info op voor later gebruik
+        self._last_pagination = {
+            "totalItems": result.get("totalItems", result.get("total", 0)),
+            "lastPage": result.get("lastPage", result.get("last_page", 0)),
+            "currentPage": result.get("currentPage", result.get("current_page", page)),
+            "perPage": limit
+        }
         # Fallback sort als API sort niet werkt
         items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
         return items
+    
+    async def get_latest_orders(self, limit: int = 20) -> list:
+        """Haal de nieuwste orders op door eerst de laatste pagina te vinden."""
+        # Stap 1: Haal eerste pagina op om totaal te weten
+        await self.get_orders(limit=50, page=1)
+        pagination = getattr(self, '_last_pagination', {})
+        last_page = pagination.get("lastPage", 0)
+        
+        if last_page <= 1:
+            # Maar 1 pagina, gewoon die returnen
+            return await self.get_orders(limit=limit, page=1)
+        
+        # Stap 2: Haal de laatste pagina(s) op
+        all_orders = []
+        # Pak de laatste 2 pagina's voor genoeg data
+        for p in range(max(1, last_page - 1), last_page + 1):
+            try:
+                orders = await self.get_orders(limit=50, page=p)
+                all_orders.extend(orders)
+            except:
+                pass
+        
+        # Sort nieuwste eerst
+        all_orders.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+        return all_orders[:limit]
     
     async def get_order(self, order_uuid: str) -> dict:
         """Haal een specifieke order op."""

@@ -161,6 +161,21 @@ async def get_orders(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/orders/latest")
+async def get_latest_orders(limit: int = 20):
+    """Haal de nieuwste orders op (automatisch laatste pagina)."""
+    try:
+        client = get_client()
+        orders = await client.get_latest_orders(limit=limit)
+        return {
+            "success": True,
+            "count": len(orders),
+            "data": orders
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/orders/all-webshops")
 async def get_orders_all_webshops(limit: int = 20):
     """Haal recente orders op over alle webshops."""
