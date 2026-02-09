@@ -39,6 +39,13 @@ class GoedgepicktAPI:
             response.raise_for_status()
             return response.json()
     
+    # ============ WEBSHOPS ============
+    
+    async def get_webshops(self) -> list:
+        """Haal alle webshops op die aan dit account gekoppeld zijn."""
+        result = await self._request("GET", "/webshops")
+        return result.get("items", result.get("data", []))
+    
     # ============ ORDERS ============
     
     async def get_orders(
@@ -47,7 +54,8 @@ class GoedgepicktAPI:
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
         limit: int = 100,
-        page: int = 1
+        page: int = 1,
+        webshop_uuid: Optional[str] = None
     ) -> list:
         """
         Haal orders op.
@@ -55,12 +63,15 @@ class GoedgepicktAPI:
         Status opties: open, processing, picked, packed, shipped, delivered
         """
         params = {
-            "webshopUuid": self.webshop_id,
             "perPage": limit,
             "page": page,
             "sort[0][field]": "createdAt",
             "sort[0][direction]": "desc"
         }
+        # Gebruik specifieke webshop of de default
+        ws = webshop_uuid or self.webshop_id
+        if ws:
+            params["webshopUuid"] = ws
         
         if status:
             params["status"] = status

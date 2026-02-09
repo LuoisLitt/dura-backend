@@ -67,6 +67,19 @@ async def health_check():
     }
 
 
+# ============ WEBSHOPS ============
+
+@app.get("/api/webshops")
+async def get_webshops():
+    """Haal alle webshops op."""
+    try:
+        client = get_client()
+        webshops = await client.get_webshops()
+        return {"success": True, "count": len(webshops), "data": webshops}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============ DASHBOARD ============
 
 @app.get("/api/dashboard")
@@ -143,6 +156,38 @@ async def get_orders(
             "count": len(orders),
             "page": page,
             "data": orders
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/orders/all-webshops")
+async def get_orders_all_webshops(limit: int = 20):
+    """Haal recente orders op over alle webshops."""
+    try:
+        client = get_client()
+        webshops = await client.get_webshops()
+        
+        all_orders = []
+        for ws in webshops:
+            ws_uuid = ws.get("uuid", ws.get("id", ""))
+            if ws_uuid:
+                try:
+                    orders = await client.get_orders(limit=limit, webshop_uuid=ws_uuid)
+                    for o in orders:
+                        o["_webshopName"] = ws.get("name", "Onbekend")
+                    all_orders.extend(orders)
+                except:
+                    pass
+        
+        # Sort alles op datum, nieuwste eerst
+        all_orders.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+        
+        return {
+            "success": True,
+            "count": len(all_orders),
+            "webshops": len(webshops),
+            "data": all_orders[:limit]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
