@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from typing import Optional
 import os
+import time
+import asyncio
 from dotenv import load_dotenv
 
 from goedgepickt import get_client, GoedgepicktAPI
@@ -15,11 +17,64 @@ from goedgepickt import get_client, GoedgepicktAPI
 # Load environment variables
 load_dotenv()
 
+# ============ IN-MEMORY CACHE ============
+
+class SimpleCache:
+    """Simpele in-memory cache met TTL."""
+    
+    def __init__(self):
+        self._store = {}
+        self._locks = {}
+    
+    def get(self, key: str):
+        """Haal item op uit cache. Returns None als verlopen of niet gevonden."""
+        if key not in self._store:
+            return None
+        value, expires_at = self._store[key]
+        if time.time() > expires_at:
+            del self._store[key]
+            return None
+        return value
+    
+    def set(self, key: str, value, ttl_seconds: int):
+        """Sla item op in cache met TTL."""
+        self._store[key] = (value, time.time() + ttl_seconds)
+    
+    def _get_lock(self, key: str) -> asyncio.Lock:
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
+    
+    async def get_or_fetch(self, key: str, ttl_seconds: int, fetch_fn):
+        """Haal uit cache of fetch via functie (met lock om stampede te voorkomen)."""
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        
+        lock = self._get_lock(key)
+        async with lock:
+            # Double-check na lock
+            cached = self.get(key)
+            if cached is not None:
+                return cached
+            
+            result = await fetch_fn()
+            self.set(key, result, ttl_seconds)
+            return result
+
+cache = SimpleCache()
+
+# Cache TTLs
+CACHE_TTL_DASHBOARD = 60    # 60 seconden
+CACHE_TTL_ORDERS = 30       # 30 seconden
+CACHE_TTL_INVENTORY = 120   # 2 minuten
+CACHE_TTL_SHIPMENTS = 30    # 30 seconden
+
 # Initialize FastAPI
 app = FastAPI(
     title="Dura Fulfilment Dashboard API",
     description="Backend API voor het Dura Fulfilment management dashboard",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # CORS configuratie
@@ -40,7 +95,7 @@ async def root():
     return {
         "status": "online",
         "service": "Dura Fulfilment Dashboard API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -77,13 +132,17 @@ async def get_webshops():
 
 @app.get("/api/dashboard")
 async def get_dashboard():
-    """Dashboard KPIs: orders vandaag, deze week, status verdeling."""
+    """Dashboard KPIs: orders vandaag, deze week, status verdeling. Gecached voor 60s."""
     try:
-        client = get_client()
-        stats = await client.get_dashboard_stats()
+        async def fetch():
+            client = get_client()
+            return await client.get_dashboard_stats()
+        
+        stats = await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, fetch)
         return {
             "success": True,
             "data": stats,
+            "cached": cache.get("dashboard") is not None,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -99,15 +158,27 @@ async def get_orders(
     page: int = 1,
     limit: int = 50
 ):
-    """Haal orders op. Gebruik created_after=YYYY-MM-DD voor recente orders."""
+    """Haal orders op. Gecached per unieke query voor 30s."""
     try:
-        client = get_client()
-        items, page_info = await client.get_orders(
-            status=status,
-            created_after=created_after,
-            limit=limit,
-            page=page
-        )
+        cache_key = f"orders:{status}:{created_after}:{page}:{limit}"
+        
+        async def fetch():
+            client = get_client()
+            items, page_info = await client.get_orders(
+                status=status,
+                created_after=created_after,
+                limit=limit,
+                page=page
+            )
+            return {
+                "items": items,
+                "page_info": page_info
+            }
+        
+        result = await cache.get_or_fetch(cache_key, CACHE_TTL_ORDERS, fetch)
+        items = result["items"]
+        page_info = result["page_info"]
+        
         return {
             "success": True,
             "count": len(items),
@@ -122,10 +193,15 @@ async def get_orders(
 
 @app.get("/api/orders/latest")
 async def get_latest_orders(limit: int = 50):
-    """Haal de nieuwste orders op (afgelopen 7 dagen, nieuwste eerst)."""
+    """Haal de nieuwste orders op (afgelopen 7 dagen, nieuwste eerst). Gecached voor 30s."""
     try:
-        client = get_client()
-        orders = await client.get_latest_orders(limit=limit)
+        cache_key = f"orders_latest:{limit}"
+        
+        async def fetch():
+            client = get_client()
+            return await client.get_latest_orders(limit=limit)
+        
+        orders = await cache.get_or_fetch(cache_key, CACHE_TTL_ORDERS, fetch)
         return {
             "success": True,
             "count": len(orders),
@@ -149,18 +225,53 @@ async def get_order(order_uuid: str):
 # ============ VOORRAAD ============
 
 @app.get("/api/inventory")
-async def get_inventory(low_stock_only: bool = False):
-    """Haal voorraad/producten op."""
+async def get_inventory(low_stock_only: bool = False, page: int = 1):
+    """Haal voorraad/producten op. Gecached voor 120s."""
     try:
-        client = get_client()
-        if low_stock_only:
-            products = await client.get_low_stock_products()
-        else:
-            products = await client.get_products()
+        cache_key = f"inventory:{low_stock_only}:{page}"
+        
+        async def fetch():
+            client = get_client()
+            if low_stock_only:
+                products = await client.get_low_stock_products()
+                return {"items": products, "total": len(products), "lastPage": 1}
+            else:
+                items, page_info = await client.get_products(limit=50, page=page)
+                return {
+                    "items": items,
+                    "total": page_info.get("totalItems", len(items)),
+                    "lastPage": page_info.get("lastPage", 1)
+                }
+        
+        result = await cache.get_or_fetch(cache_key, CACHE_TTL_INVENTORY, fetch)
+        
         return {
             "success": True,
-            "count": len(products),
-            "data": products
+            "count": len(result["items"]),
+            "total": result["total"],
+            "page": page,
+            "lastPage": result["lastPage"],
+            "data": result["items"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/inventory/alerts")
+async def get_inventory_alerts():
+    """Haal producten met lage voorraad op. Gecached voor 120s."""
+    try:
+        cache_key = "inventory_alerts"
+        
+        async def fetch():
+            client = get_client()
+            return await client.get_low_stock_products(threshold=25)
+        
+        alerts = await cache.get_or_fetch(cache_key, CACHE_TTL_INVENTORY, fetch)
+        return {
+            "success": True,
+            "count": len(alerts),
+            "data": alerts
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -174,14 +285,23 @@ async def get_shipments(
     page: int = 1,
     limit: int = 50
 ):
-    """Haal verzendingen op."""
+    """Haal verzendingen op. Gecached voor 30s."""
     try:
-        client = get_client()
-        items, page_info = await client.get_shipments(
-            created_after=created_after,
-            limit=limit,
-            page=page
-        )
+        cache_key = f"shipments:{created_after}:{page}:{limit}"
+        
+        async def fetch():
+            client = get_client()
+            items, page_info = await client.get_shipments(
+                created_after=created_after,
+                limit=limit,
+                page=page
+            )
+            return {"items": items, "page_info": page_info}
+        
+        result = await cache.get_or_fetch(cache_key, CACHE_TTL_SHIPMENTS, fetch)
+        items = result["items"]
+        page_info = result["page_info"]
+        
         return {
             "success": True,
             "count": len(items),
@@ -196,10 +316,15 @@ async def get_shipments(
 
 @app.get("/api/shipments/latest")
 async def get_latest_shipments(limit: int = 50):
-    """Haal de nieuwste verzendingen op."""
+    """Haal de nieuwste verzendingen op. Gecached voor 30s."""
     try:
-        client = get_client()
-        shipments = await client.get_latest_shipments(limit=limit)
+        cache_key = f"shipments_latest:{limit}"
+        
+        async def fetch():
+            client = get_client()
+            return await client.get_latest_shipments(limit=limit)
+        
+        shipments = await cache.get_or_fetch(cache_key, CACHE_TTL_SHIPMENTS, fetch)
         return {
             "success": True,
             "count": len(shipments),

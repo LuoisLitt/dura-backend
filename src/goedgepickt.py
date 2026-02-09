@@ -73,7 +73,7 @@ class GoedgepicktAPI:
         Returns (items, pageInfo).
         """
         params = {
-            "perPage": limit,
+            "perPage": min(limit, 50),  # Max 50 per pagina
             "page": page
         }
         
@@ -123,23 +123,60 @@ class GoedgepicktAPI:
     
     # ============ PRODUCTEN / VOORRAAD ============
     
-    async def get_products(self, limit: int = 500) -> list:
-        """Haal alle producten met voorraadinfo op."""
+    async def get_products(self, limit: int = 50, page: int = 1) -> tuple:
+        """
+        Haal producten met voorraadinfo op. Max 50 per pagina.
+        Returns (items, pageInfo).
+        """
         params = {
             "webshopUuid": self.webshop_id,
-            "perPage": limit
+            "perPage": min(limit, 50),
+            "page": page
         }
         result = await self._request("GET", "/products", params=params)
-        return result.get("items", [])
+        items = result.get("items", [])
+        page_info = result.get("pageInfo", {})
+        return items, page_info
+    
+    async def get_all_products(self, max_pages: int = 10) -> list:
+        """Haal alle producten op (pagineer door meerdere pagina's)."""
+        all_products = []
+        page = 1
+        while page <= max_pages:
+            items, page_info = await self.get_products(limit=50, page=page)
+            if not items:
+                break
+            all_products.extend(items)
+            last_page = page_info.get("lastPage", 1)
+            if page >= last_page:
+                break
+            page += 1
+        return all_products
     
     async def get_product(self, product_uuid: str) -> dict:
         """Haal een specifiek product op."""
         return await self._request("GET", f"/products/{product_uuid}")
     
-    async def get_low_stock_products(self, threshold: int = 10) -> list:
-        """Haal producten met lage voorraad op."""
-        products = await self.get_products()
-        return [p for p in products if p.get("stockLevel", 0) <= threshold]
+    async def get_low_stock_products(self, threshold: int = 25) -> list:
+        """Haal producten met lage voorraad op (scan alle pagina's)."""
+        low_stock = []
+        page = 1
+        max_pages = 20
+        while page <= max_pages:
+            items, page_info = await self.get_products(limit=50, page=page)
+            if not items:
+                break
+            for p in items:
+                stock = p.get("stock", p.get("stockLevel", 0)) or 0
+                if stock <= threshold:
+                    low_stock.append(p)
+            last_page = page_info.get("lastPage", 1)
+            if page >= last_page:
+                break
+            page += 1
+        # Sort: lowest stock first
+        low_stock.sort(key=lambda p: p.get("stock", p.get("stockLevel", 0)) or 0)
+        return low_stock
     
     # ============ VERZENDINGEN ============
     
@@ -150,7 +187,7 @@ class GoedgepicktAPI:
         page: int = 1
     ) -> tuple:
         """Haal verzendingen op. Returns (items, pageInfo)."""
-        params = {"perPage": limit, "page": page}
+        params = {"perPage": min(limit, 50), "page": page}
         if created_after:
             params["createdAfter"] = created_after
         
@@ -214,17 +251,17 @@ class GoedgepicktAPI:
         today_str = datetime.now().strftime("%Y-%m-%d")
         week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
         
-        # Orders vandaag + deze week (alleen counts)
+        # Orders vandaag + deze week (alleen counts via page=1 limit=1)
         _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
         _, week_info = await self.get_orders(created_after=week_start, limit=1, page=1)
         
         orders_today_count = today_info.get("totalItems", 0)
         orders_week_count = week_info.get("totalItems", 0)
         
-        # Status verdeling: tel over ALLE orders van vandaag (niet alleen 50)
+        # Status verdeling: tel over orders van vandaag (max 5 pagina's voor snelheid)
         orders_by_status = {}
         page = 1
-        max_pages = 20  # safety limit
+        max_pages = 5
         while page <= max_pages:
             items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
             if not items:
@@ -237,9 +274,24 @@ class GoedgepicktAPI:
                 break
             page += 1
         
-        # Shipments deze week
-        _, ship_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
-        shipments_week_count = ship_info.get("totalItems", 0)
+        # Shipments vandaag + deze week
+        _, ship_today_info = await self.get_shipments(created_after=today_str, limit=1, page=1)
+        _, ship_week_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
+        shipments_today_count = ship_today_info.get("totalItems", 0)
+        shipments_week_count = ship_week_info.get("totalItems", 0)
+        
+        # Orders per dag deze week (voor chart)
+        orders_per_day = {}
+        current = datetime.strptime(week_start, "%Y-%m-%d")
+        today = datetime.now()
+        while current <= today:
+            day_str = current.strftime("%Y-%m-%d")
+            next_day = current + timedelta(days=1)
+            _, day_info = await self.get_orders(created_after=day_str, limit=1, page=1)
+            day_total = day_info.get("totalItems", 0)
+            # Subtract next days if possible (createdAfter is inclusive)
+            orders_per_day[day_str] = day_total
+            current = next_day
         
         return {
             "orders": {
@@ -248,8 +300,10 @@ class GoedgepicktAPI:
                 "by_status": orders_by_status
             },
             "shipments": {
+                "today": shipments_today_count,
                 "week": shipments_week_count
-            }
+            },
+            "orders_per_day": orders_per_day
         }
     
     async def test_connection(self) -> bool:
