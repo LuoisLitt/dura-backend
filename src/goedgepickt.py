@@ -64,114 +64,62 @@ class GoedgepicktAPI:
     async def get_orders(
         self,
         status: Optional[str] = None,
-        date_from: Optional[datetime] = None,
-        date_to: Optional[datetime] = None,
-        limit: int = 100,
-        page: int = 1,
-        webshop_uuid: Optional[str] = None
-    ) -> list:
+        created_after: Optional[str] = None,
+        limit: int = 50,
+        page: int = 1
+    ) -> tuple:
         """
-        Haal orders op.
-        
-        Status opties: open, processing, picked, packed, shipped, delivered
+        Haal orders op. Gebruik createdAfter voor recente orders.
+        Returns (items, pageInfo).
         """
         params = {
             "perPage": limit,
-            "page": page,
-            "sort[0][field]": "createdAt",
-            "sort[0][direction]": "desc"
+            "page": page
         }
-        # Gebruik specifieke webshop of de default
-        ws = webshop_uuid or self.webshop_id
-        if ws:
-            params["webshopUuid"] = ws
         
+        if created_after:
+            params["createdAfter"] = created_after
         if status:
             params["status"] = status
-        if date_from:
-            params["createdAtFrom"] = date_from.strftime("%Y-%m-%d")
-        if date_to:
-            params["createdAtTo"] = date_to.strftime("%Y-%m-%d")
         
         result = await self._request("GET", "/orders", params=params)
         items = result.get("items", [])
-        # Sla pagination info op voor later gebruik
         page_info = result.get("pageInfo", {})
-        self._last_pagination = {
-            "totalItems": page_info.get("totalItems", 0),
-            "lastPage": page_info.get("lastPage", 0),
-            "currentPage": page_info.get("currentPage", page),
-            "perPage": limit
-        }
-        # Fallback sort als API sort niet werkt
-        items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
-        return items
+        return items, page_info
     
-    async def get_latest_orders(self, limit: int = 20) -> list:
-        """Haal de nieuwste orders op over alle webshops."""
-        import asyncio
+    async def get_latest_orders(self, limit: int = 50) -> list:
+        """Haal de nieuwste orders op via createdAfter + laatste pagina."""
+        # Stap 1: Zoek orders van afgelopen 7 dagen
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        items, page_info = await self.get_orders(created_after=week_ago, limit=50, page=1)
         
-        webshops = await self.get_webshops()
+        last_page = page_info.get("lastPage", 1)
+        total = page_info.get("totalItems", 0)
         
-        async def fetch_recent_for_webshop(ws):
-            ws_uuid = ws.get("uuid", "")
-            if not ws_uuid:
-                return []
-            try:
-                # Haal pagina 1 op om lastPage te vinden
-                params = {
-                    "webshopUuid": ws_uuid,
-                    "perPage": 50,
-                    "page": 1
-                }
-                result = await self._request("GET", "/orders", params=params)
-                page_info = result.get("pageInfo", {})
-                last_page = page_info.get("lastPage", 1)
-                
-                if last_page <= 1:
-                    items = result.get("items", [])
-                    for i in items:
-                        i["webshopName"] = ws.get("name", "Onbekend")
-                    return items
-                
-                # Haal de laatste pagina op (nieuwste orders)
-                params["page"] = last_page
-                result = await self._request("GET", "/orders", params=params)
-                items = result.get("items", [])
-                for i in items:
-                    i["webshopName"] = ws.get("name", "Onbekend")
-                return items
-            except:
-                return []
+        if last_page <= 1:
+            items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+            return items[:limit]
         
-        # Haal parallel van alle webshops op (max 10 tegelijk)
-        all_orders = []
-        batch_size = 10
-        for i in range(0, len(webshops), batch_size):
-            batch = webshops[i:i+batch_size]
-            results = await asyncio.gather(*[fetch_recent_for_webshop(ws) for ws in batch])
-            for orders in results:
-                all_orders.extend(orders)
+        # Stap 2: Haal de laatste pagina op (daar zitten de nieuwste)
+        items, _ = await self.get_orders(created_after=week_ago, limit=50, page=last_page)
         
-        # Sort nieuwste eerst
-        all_orders.sort(key=lambda x: x.get("createDate", ""), reverse=True)
-        return all_orders[:limit]
+        # Stap 3: Als er ook een voorlaatste pagina is, pak die ook
+        if last_page > 1:
+            items2, _ = await self.get_orders(created_after=week_ago, limit=50, page=last_page - 1)
+            items = items2 + items
+        
+        items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+        return items[:limit]
     
     async def get_order(self, order_uuid: str) -> dict:
         """Haal een specifieke order op."""
         return await self._request("GET", f"/orders/{order_uuid}")
     
-    async def get_orders_today(self) -> list:
-        """Haal alle orders van vandaag op."""
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        return await self.get_orders(date_from=today)
-    
-    async def get_orders_this_week(self) -> list:
-        """Haal alle orders van deze week op."""
-        today = datetime.now()
-        start_of_week = today - timedelta(days=today.weekday())
-        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-        return await self.get_orders(date_from=start_of_week)
+    async def get_orders_since(self, since: str, limit: int = 50) -> tuple:
+        """Haal orders op sinds datum. Returns (items, total_count)."""
+        items, page_info = await self.get_orders(created_after=since, limit=limit, page=1)
+        total = page_info.get("totalItems", len(items))
+        return items, total
     
     # ============ PRODUCTEN / VOORRAAD ============
     
@@ -197,30 +145,37 @@ class GoedgepicktAPI:
     
     async def get_shipments(
         self,
-        status: Optional[str] = None,
-        date_from: Optional[datetime] = None,
-        limit: int = 100
-    ) -> list:
-        """
-        Haal verzendingen op.
-        
-        Status opties: pending, shipped, delivered, returned
-        """
-        params = {
-            "webshopUuid": self.webshop_id,
-            "perPage": limit
-        }
-        
-        if status:
-            params["status"] = status
-        if date_from:
-            params["createdAtFrom"] = date_from.strftime("%Y-%m-%d")
+        created_after: Optional[str] = None,
+        limit: int = 50,
+        page: int = 1
+    ) -> tuple:
+        """Haal verzendingen op. Returns (items, pageInfo)."""
+        params = {"perPage": limit, "page": page}
+        if created_after:
+            params["createdAfter"] = created_after
         
         result = await self._request("GET", "/shipments", params=params)
         items = result.get("items", [])
-        # Sort nieuwste eerst
+        page_info = result.get("pageInfo", {})
+        return items, page_info
+    
+    async def get_latest_shipments(self, limit: int = 50) -> list:
+        """Haal nieuwste verzendingen op."""
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        items, page_info = await self.get_shipments(created_after=week_ago, limit=50, page=1)
+        
+        last_page = page_info.get("lastPage", 1)
+        if last_page <= 1:
+            items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+            return items[:limit]
+        
+        items, _ = await self.get_shipments(created_after=week_ago, limit=50, page=last_page)
+        if last_page > 1:
+            items2, _ = await self.get_shipments(created_after=week_ago, limit=50, page=last_page - 1)
+            items = items2 + items
+        
         items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
-        return items
+        return items[:limit]
     
     async def get_shipment_tracking(self, shipment_uuid: str) -> dict:
         """Haal tracking info voor een verzending op."""
@@ -256,57 +211,35 @@ class GoedgepicktAPI:
     
     async def get_dashboard_stats(self) -> dict:
         """Verzamel alle statistieken voor het dashboard."""
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        week_start = today - timedelta(days=today.weekday())
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
         
-        # Haal data parallel op
-        orders_today = await self.get_orders(date_from=today)
-        orders_week = await self.get_orders(date_from=week_start)
-        products = await self.get_products()
-        shipments_week = await self.get_shipments(date_from=week_start)
+        # Orders vandaag + deze week (alleen counts)
+        _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
+        _, week_info = await self.get_orders(created_after=week_start, limit=1, page=1)
         
-        # Bereken statistieken
+        orders_today_count = today_info.get("totalItems", 0)
+        orders_week_count = week_info.get("totalItems", 0)
+        
+        # Recente orders voor status verdeling
+        recent_orders = await self.get_latest_orders(limit=50)
         orders_by_status = {}
-        for order in orders_today:
+        for order in recent_orders:
             status = order.get("status", "unknown")
             orders_by_status[status] = orders_by_status.get(status, 0) + 1
         
-        low_stock = [p for p in products if p.get("stockLevel", 0) <= p.get("minStockLevel", 10)]
-        critical_stock = [p for p in products if p.get("stockLevel", 0) <= 10]
-        
-        # Carrier verdeling
-        carrier_stats = {}
-        delivered_on_time = 0
-        total_delivered = 0
-        
-        for shipment in shipments_week:
-            carrier = shipment.get("carrier", "unknown")
-            carrier_stats[carrier] = carrier_stats.get(carrier, 0) + 1
-            
-            if shipment.get("status") == "delivered":
-                total_delivered += 1
-                # Check on-time (vereenvoudigd)
-                if shipment.get("deliveredOnTime", True):
-                    delivered_on_time += 1
-        
-        on_time_rate = (delivered_on_time / total_delivered * 100) if total_delivered > 0 else 100
+        # Shipments deze week
+        _, ship_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
+        shipments_week_count = ship_info.get("totalItems", 0)
         
         return {
             "orders": {
-                "today": len(orders_today),
-                "week": len(orders_week),
+                "today": orders_today_count,
+                "week": orders_week_count,
                 "by_status": orders_by_status
             },
-            "inventory": {
-                "total_products": len(products),
-                "low_stock": len(low_stock),
-                "critical_stock": len(critical_stock),
-                "low_stock_items": low_stock[:10]  # Top 10
-            },
             "shipments": {
-                "week": len(shipments_week),
-                "on_time_rate": round(on_time_rate, 1),
-                "by_carrier": carrier_stats
+                "week": shipments_week_count
             }
         }
     
