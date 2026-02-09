@@ -179,19 +179,29 @@ async def get_latest_orders(limit: int = 20):
 
 
 @app.get("/api/debug/raw-orders")
-async def debug_raw_orders():
+async def debug_raw_orders(page: int = 1, per_page: int = 5, webshop: Optional[str] = None):
     """Debug: toon ruwe API response van Goedgepickt."""
     try:
         client = get_client()
-        result = await client._request("GET", "/orders", params={
-            "webshopUuid": client.webshop_id,
-            "perPage": 1,
-            "page": 1
-        })
-        # Return alle keys behalve items (te groot)
-        keys = {k: v for k, v in result.items() if k != "items"}
-        keys["items_count"] = len(result.get("items", []))
-        return keys
+        params = {"perPage": per_page, "page": page}
+        if webshop:
+            params["webshopUuid"] = webshop
+        else:
+            params["webshopUuid"] = client.webshop_id
+        result = await client._request("GET", "/orders", params=params)
+        page_info = result.get("pageInfo", {})
+        items = result.get("items", [])
+        # Compacte weergave van orders
+        compact_items = []
+        for o in items:
+            compact_items.append({
+                "id": o.get("externalDisplayId"),
+                "date": o.get("createDate", "")[:16],
+                "status": o.get("status"),
+                "name": f"{o.get('billingFirstName','')} {o.get('billingLastName','')}".strip(),
+                "webshop": o.get("webshopName", "?")
+            })
+        return {"pageInfo": page_info, "items": compact_items}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
