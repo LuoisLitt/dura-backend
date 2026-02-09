@@ -334,6 +334,80 @@ async def get_latest_shipments(limit: int = 50):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============ PICKS / MEDEWERKERS ============
+
+@app.get("/api/users")
+async def get_users():
+    """Haal alle gebruikers/medewerkers op. Gecached voor 120s."""
+    try:
+        cache_key = "users"
+        async def fetch():
+            client = get_client()
+            return await client.get_users()
+        
+        users = await cache.get_or_fetch(cache_key, 120, fetch)
+        return {"success": True, "count": len(users), "data": users}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/picks")
+async def get_picks(date_from: Optional[str] = None, date_to: Optional[str] = None, user_uuid: Optional[str] = None):
+    """Haal pick-acties op. Gecached voor 60s."""
+    try:
+        cache_key = f"picks:{date_from}:{date_to}:{user_uuid}"
+        async def fetch():
+            client = get_client()
+            df = datetime.strptime(date_from, "%Y-%m-%d") if date_from else None
+            dt = datetime.strptime(date_to, "%Y-%m-%d") if date_to else None
+            return await client.get_picks(date_from=df, date_to=dt, user_uuid=user_uuid)
+        
+        picks = await cache.get_or_fetch(cache_key, 60, fetch)
+        return {"success": True, "count": len(picks), "data": picks}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/picks/stats")
+async def get_pick_stats():
+    """Medewerker pick-statistieken van vandaag. Gecached voor 60s."""
+    try:
+        cache_key = "pick_stats_today"
+        async def fetch():
+            client = get_client()
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            picks = await client.get_picks(date_from=today)
+            users = await client.get_users()
+            
+            # Maak user lookup
+            user_map = {u.get("uuid", ""): u for u in users}
+            
+            # Tel picks per user
+            stats = {}
+            for pick in picks:
+                uid = pick.get("userUuid") or pick.get("user_uuid") or "unknown"
+                if uid not in stats:
+                    user = user_map.get(uid, {})
+                    stats[uid] = {
+                        "uuid": uid,
+                        "name": user.get("name") or user.get("firstName", "?") + " " + user.get("lastName", ""),
+                        "email": user.get("email", ""),
+                        "picks": 0,
+                        "items": 0
+                    }
+                stats[uid]["picks"] += 1
+                stats[uid]["items"] += pick.get("quantity", 1)
+            
+            # Sorteer op meeste picks
+            ranked = sorted(stats.values(), key=lambda x: x["picks"], reverse=True)
+            return {"pickers": ranked, "total_picks": len(picks), "total_users": len(users)}
+        
+        result = await cache.get_or_fetch(cache_key, 60, fetch)
+        return {"success": True, "data": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============ RUN SERVER ============
 
 if __name__ == "__main__":
