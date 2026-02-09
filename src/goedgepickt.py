@@ -42,9 +42,22 @@ class GoedgepicktAPI:
     # ============ WEBSHOPS ============
     
     async def get_webshops(self) -> list:
-        """Haal alle webshops op die aan dit account gekoppeld zijn."""
-        result = await self._request("GET", "/webshops")
-        return result.get("items", result.get("data", []))
+        """Haal alle webshops op (pagineer door alle pagina's)."""
+        all_webshops = []
+        page = 1
+        while True:
+            result = await self._request("GET", "/webshops", params={"perPage": 50, "page": page})
+            items = result.get("items", [])
+            all_webshops.extend(items)
+            
+            page_info = result.get("pageInfo", {})
+            last_page = page_info.get("lastPage", 1)
+            
+            if page >= last_page or not items:
+                break
+            page += 1
+        
+        return all_webshops
     
     # ============ ORDERS ============
     
@@ -95,25 +108,50 @@ class GoedgepicktAPI:
         return items
     
     async def get_latest_orders(self, limit: int = 20) -> list:
-        """Haal de nieuwste orders op door eerst de laatste pagina te vinden."""
-        # Stap 1: Haal eerste pagina op om totaal te weten
-        await self.get_orders(limit=50, page=1)
-        pagination = getattr(self, '_last_pagination', {})
-        last_page = pagination.get("lastPage", 0)
+        """Haal de nieuwste orders op over alle webshops."""
+        import asyncio
         
-        if last_page <= 1:
-            # Maar 1 pagina, gewoon die returnen
-            return await self.get_orders(limit=limit, page=1)
+        webshops = await self.get_webshops()
         
-        # Stap 2: Haal de laatste pagina(s) op
-        all_orders = []
-        # Pak de laatste 2 pagina's voor genoeg data
-        for p in range(max(1, last_page - 1), last_page + 1):
+        async def fetch_recent_for_webshop(ws):
+            ws_uuid = ws.get("uuid", "")
+            if not ws_uuid:
+                return []
             try:
-                orders = await self.get_orders(limit=50, page=p)
-                all_orders.extend(orders)
+                # Haal pagina 1 op om lastPage te vinden
+                params = {
+                    "webshopUuid": ws_uuid,
+                    "perPage": 50,
+                    "page": 1
+                }
+                result = await self._request("GET", "/orders", params=params)
+                page_info = result.get("pageInfo", {})
+                last_page = page_info.get("lastPage", 1)
+                
+                if last_page <= 1:
+                    items = result.get("items", [])
+                    for i in items:
+                        i["webshopName"] = ws.get("name", "Onbekend")
+                    return items
+                
+                # Haal de laatste pagina op (nieuwste orders)
+                params["page"] = last_page
+                result = await self._request("GET", "/orders", params=params)
+                items = result.get("items", [])
+                for i in items:
+                    i["webshopName"] = ws.get("name", "Onbekend")
+                return items
             except:
-                pass
+                return []
+        
+        # Haal parallel van alle webshops op (max 10 tegelijk)
+        all_orders = []
+        batch_size = 10
+        for i in range(0, len(webshops), batch_size):
+            batch = webshops[i:i+batch_size]
+            results = await asyncio.gather(*[fetch_recent_for_webshop(ws) for ws in batch])
+            for orders in results:
+                all_orders.extend(orders)
         
         # Sort nieuwste eerst
         all_orders.sort(key=lambda x: x.get("createDate", ""), reverse=True)
