@@ -74,8 +74,54 @@ CACHE_TTL_SHIPMENTS = 30    # 30 seconden
 app = FastAPI(
     title="Dura Fulfilment Dashboard API",
     description="Backend API voor het Dura Fulfilment management dashboard",
-    version="2.1.0"
+    version="3.0.0"
 )
+
+# ============ CACHE PRE-WARMING ============
+
+_warm_task = None
+
+async def warm_cache():
+    """Achtergrond taak die cache elke 45s ververst zodat users altijd cached data krijgen."""
+    while True:
+        try:
+            client = get_client()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # Dashboard stats
+            stats = await client.get_dashboard_stats()
+            cache.set("dashboard", stats, CACHE_TTL_DASHBOARD + 30)
+            
+            # Latest orders (voor /api/orders/latest en frontpage)
+            latest = await client.get_latest_orders(limit=50)
+            cache.set("orders_latest:50", latest, CACHE_TTL_ORDERS + 30)
+            
+            # Orders vandaag page info (voor paginering)
+            _, today_info = await client.get_orders(created_after=today_str, limit=50, page=1)
+            last_page = today_info.get("lastPage", 1)
+            
+            # Pre-warm eerste + laatste pagina van vandaag
+            if last_page > 1:
+                items_last, info_last = await client.get_orders(created_after=today_str, limit=50, page=last_page)
+                cache.set(f"orders:{None}:{today_str}:{last_page}:50", {"items": items_last, "page_info": info_last}, CACHE_TTL_ORDERS + 30)
+            
+            # Latest shipments
+            ship_latest = await client.get_latest_shipments(limit=50)
+            cache.set("shipments_latest:50", ship_latest, CACHE_TTL_SHIPMENTS + 30)
+            
+            # Inventory alerts
+            alerts = await client.get_low_stock_products(threshold=25)
+            cache.set("inventory_alerts", alerts, CACHE_TTL_INVENTORY + 30)
+            
+        except Exception as e:
+            print(f"Cache warm error: {e}")
+        
+        await asyncio.sleep(45)
+
+@app.on_event("startup")
+async def startup_event():
+    global _warm_task
+    _warm_task = asyncio.create_task(warm_cache())
 
 # CORS configuratie
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -86,6 +132,119 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============ COMBINED PAGE DATA ============
+
+@app.get("/api/page-data/{page}")
+async def get_page_data(page: str):
+    """Gecombineerd endpoint: alle data voor een pagina in één call. Veel sneller dan losse calls."""
+    try:
+        client = get_client()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        result = {}
+        
+        if page == "dashboard":
+            # Dashboard heeft nodig: stats + latest orders + inventory alerts
+            async def fetch_stats():
+                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, lambda: client.get_dashboard_stats())
+            async def fetch_latest():
+                return await cache.get_or_fetch("orders_latest:5", CACHE_TTL_ORDERS, lambda: client.get_latest_orders(limit=5))
+            async def fetch_alerts():
+                return await cache.get_or_fetch("inventory_alerts", CACHE_TTL_INVENTORY, lambda: client.get_low_stock_products(threshold=25))
+            
+            stats, latest, alerts = await asyncio.gather(fetch_stats(), fetch_latest(), fetch_alerts())
+            result = {
+                "dashboard": stats,
+                "recentOrders": latest[:5],
+                "inventoryAlerts": alerts[:5]
+            }
+        
+        elif page == "orders":
+            # Orders: stats + laatste pagina orders
+            async def fetch_stats():
+                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, lambda: client.get_dashboard_stats())
+            async def fetch_page_info():
+                return await cache.get_or_fetch(f"orders_pageinfo:{today_str}", CACHE_TTL_ORDERS, 
+                    lambda: client.get_orders(created_after=today_str, limit=50, page=1))
+            
+            stats, (first_items, page_info) = await asyncio.gather(fetch_stats(), fetch_page_info())
+            last_page = page_info.get("lastPage", 1)
+            total = page_info.get("totalItems", 0)
+            
+            # Haal de laatste pagina op (nieuwste orders)
+            if last_page > 1:
+                cache_key = f"orders:{None}:{today_str}:{last_page}:50"
+                async def fetch_last():
+                    items, info = await client.get_orders(created_after=today_str, limit=50, page=last_page)
+                    return {"items": items, "page_info": info}
+                last_data = await cache.get_or_fetch(cache_key, CACHE_TTL_ORDERS, fetch_last)
+                orders = last_data["items"]
+            else:
+                orders = first_items
+            
+            orders.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+            result = {
+                "dashboard": stats,
+                "orders": orders,
+                "total": total,
+                "lastPage": last_page
+            }
+        
+        elif page == "shipments":
+            async def fetch_stats():
+                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, lambda: client.get_dashboard_stats())
+            async def fetch_page_info():
+                return await cache.get_or_fetch(f"shipments_pageinfo:{today_str}", CACHE_TTL_SHIPMENTS,
+                    lambda: client.get_shipments(created_after=today_str, limit=50, page=1))
+            
+            stats, (first_items, page_info) = await asyncio.gather(fetch_stats(), fetch_page_info())
+            last_page = page_info.get("lastPage", 1)
+            total = page_info.get("totalItems", 0)
+            
+            if last_page > 1:
+                cache_key = f"shipments_last:{today_str}:{last_page}"
+                async def fetch_last():
+                    items, info = await client.get_shipments(created_after=today_str, limit=50, page=last_page)
+                    return {"items": items, "page_info": info}
+                last_data = await cache.get_or_fetch(cache_key, CACHE_TTL_SHIPMENTS, fetch_last)
+                shipments = last_data["items"]
+            else:
+                shipments = first_items
+            
+            shipments.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+            result = {
+                "dashboard": stats,
+                "shipments": shipments,
+                "total": total,
+                "lastPage": last_page
+            }
+        
+        elif page == "warehouse":
+            async def fetch_stats():
+                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, lambda: client.get_dashboard_stats())
+            async def fetch_latest():
+                return await cache.get_or_fetch("orders_latest:50", CACHE_TTL_ORDERS, lambda: client.get_latest_orders(limit=50))
+            async def fetch_alerts():
+                return await cache.get_or_fetch("inventory_alerts", CACHE_TTL_INVENTORY, lambda: client.get_low_stock_products(threshold=25))
+            
+            stats, latest, alerts = await asyncio.gather(fetch_stats(), fetch_latest(), fetch_alerts())
+            result = {
+                "dashboard": stats,
+                "latestOrders": latest,
+                "inventoryAlerts": alerts[:4]
+            }
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown page: {page}")
+        
+        result["cached"] = True
+        result["timestamp"] = datetime.now().isoformat()
+        return {"success": True, "data": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============ HEALTH CHECK ============
