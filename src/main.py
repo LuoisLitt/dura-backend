@@ -210,6 +210,30 @@ async def get_latest_orders(limit: int = 20):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/debug/test-sort")
+async def debug_test_sort(sort_param: str = ""):
+    """Test verschillende sort parameters direct op de Goedgepickt API."""
+    try:
+        client = get_client()
+        import httpx
+        
+        # Bouw params handmatig
+        url = f"{client.BASE_URL}/orders?perPage=3"
+        if sort_param:
+            url += f"&{sort_param}"
+        
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(url, headers=client.headers, timeout=30.0)
+            data = resp.json()
+        
+        items = data.get("items", [])
+        page_info = data.get("pageInfo", {})
+        compact = [{"date": o.get("createDate","")[:16], "id": o.get("externalDisplayId",""), "status": o.get("status","")} for o in items]
+        return {"sort_param": sort_param, "pageInfo": page_info, "items": compact}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/debug/raw-orders")
 async def debug_raw_orders(page: int = 1, per_page: int = 5, webshop: Optional[str] = None):
     """Debug: toon ruwe API response van Goedgepickt."""
