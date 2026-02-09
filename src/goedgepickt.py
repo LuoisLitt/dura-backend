@@ -251,21 +251,34 @@ class GoedgepicktAPI:
         today_str = datetime.now().strftime("%Y-%m-%d")
         week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
         
+        # Vorige week berekenen
+        prev_week_start = (datetime.now() - timedelta(days=datetime.now().weekday() + 7)).strftime("%Y-%m-%d")
+        prev_week_end = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        
         # Orders vandaag + deze week (alleen counts via page=1 limit=1)
         _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
         _, week_info = await self.get_orders(created_after=week_start, limit=1, page=1)
         
-        orders_today_count = today_info.get("totalItems", 0)
-        orders_week_count = week_info.get("totalItems", 0)
+        # Vorige week orders count
+        _, prev_week_info = await self.get_orders(created_after=prev_week_start, limit=1, page=1)
+        prev_week_total = prev_week_info.get("totalItems", 0)
+        this_week_total = week_info.get("totalItems", 0)
+        # prev_week_total is alles SINCE prev_week_start (inclusief deze week), dus we moeten aftrekken
+        prev_week_orders = max(0, prev_week_total - this_week_total)
         
-        # Status verdeling: tel over orders van vandaag (max 5 pagina's voor snelheid)
+        orders_today_count = today_info.get("totalItems", 0)
+        orders_week_count = this_week_total
+        
+        # Status verdeling + extra data: tel over orders van vandaag (max 5 pagina's voor snelheid)
         orders_by_status = {}
+        today_orders_sample = []  # Bewaar orders voor extra berekeningen
         page = 1
         max_pages = 5
         while page <= max_pages:
             items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
             if not items:
                 break
+            today_orders_sample.extend(items)
             for order in items:
                 status = order.get("status", "unknown")
                 orders_by_status[status] = orders_by_status.get(status, 0) + 1
@@ -274,17 +287,106 @@ class GoedgepicktAPI:
                 break
             page += 1
         
+        # === Feature 1: Omzet berekenen ===
+        revenue_today = 0.0
+        revenue_week = 0.0
+        for order in today_orders_sample:
+            try:
+                paid = float(order.get("totalPaid", "0") or "0")
+                revenue_today += paid
+            except (ValueError, TypeError):
+                pass
+        
+        # Week omzet: haal sample van week orders
+        week_orders_sample = []
+        wp = 1
+        while wp <= 5:
+            items, wpg = await self.get_orders(created_after=week_start, limit=50, page=wp)
+            if not items:
+                break
+            week_orders_sample.extend(items)
+            if wp >= wpg.get("lastPage", 1):
+                break
+            wp += 1
+        
+        for order in week_orders_sample:
+            try:
+                paid = float(order.get("totalPaid", "0") or "0")
+                revenue_week += paid
+            except (ValueError, TypeError):
+                pass
+        
+        # Schaal op als we een sample hebben
+        if len(week_orders_sample) > 0 and orders_week_count > len(week_orders_sample):
+            scale = orders_week_count / len(week_orders_sample)
+            revenue_week = revenue_week * scale
+        
+        # === Feature 2: Gemiddelde verwerkingstijd ===
+        processing_times = []
+        for order in today_orders_sample:
+            create_date = order.get("createDate")
+            finish_date = order.get("finishDate")
+            if create_date and finish_date:
+                try:
+                    created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
+                    finished = datetime.fromisoformat(finish_date.replace("Z", "+00:00"))
+                    diff_minutes = (finished - created).total_seconds() / 60
+                    if 0 < diff_minutes < 10080:  # Max 1 week
+                        processing_times.append(diff_minutes)
+                except (ValueError, TypeError):
+                    pass
+        
+        avg_processing_minutes = 0
+        if processing_times:
+            avg_processing_minutes = sum(processing_times) / len(processing_times)
+        
+        # === Feature 4: Probleem orders ===
+        problem_count = 0
+        now = datetime.now()
+        for order in today_orders_sample:
+            # attentionNeeded flag
+            if order.get("attentionNeeded") == 1 or order.get("attentionNeeded") == "1" or order.get("attentionNeeded") is True:
+                problem_count += 1
+                continue
+            # Orders ouder dan 4 uur die nog niet afgerond zijn
+            status = order.get("status", "")
+            if status not in ("completed", "delivered", "shipped"):
+                create_date = order.get("createDate")
+                if create_date:
+                    try:
+                        created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
+                        # Maak offset-naive voor vergelijking
+                        created_naive = created.replace(tzinfo=None)
+                        if (now - created_naive).total_seconds() > 4 * 3600:
+                            problem_count += 1
+                    except (ValueError, TypeError):
+                        pass
+        
+        # === Feature 6: Top webshops ===
+        webshop_counts = {}
+        for order in today_orders_sample:
+            shop = order.get("webshopName", "Onbekend")
+            webshop_counts[shop] = webshop_counts.get(shop, 0) + 1
+        
+        top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_webshops_list = [{"name": name, "count": count} for name, count in top_webshops]
+        
         # Shipments vandaag + deze week
         _, ship_today_info = await self.get_shipments(created_after=today_str, limit=1, page=1)
         _, ship_week_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
         shipments_today_count = ship_today_info.get("totalItems", 0)
         shipments_week_count = ship_week_info.get("totalItems", 0)
         
+        # Vorige week shipments
+        _, prev_ship_info = await self.get_shipments(created_after=prev_week_start, limit=1, page=1)
+        prev_ship_total = prev_ship_info.get("totalItems", 0)
+        prev_week_shipments = max(0, prev_ship_total - shipments_week_count)
+        
         # Orders per dag deze week (voor chart)
         orders_per_day = {}
         current = datetime.strptime(week_start, "%Y-%m-%d")
-        today = datetime.now()
-        while current <= today:
+        today_dt = datetime.now()
+        while current <= today_dt:
             day_str = current.strftime("%Y-%m-%d")
             next_day = current + timedelta(days=1)
             _, day_info = await self.get_orders(created_after=day_str, limit=1, page=1)
@@ -303,7 +405,18 @@ class GoedgepicktAPI:
                 "today": shipments_today_count,
                 "week": shipments_week_count
             },
-            "orders_per_day": orders_per_day
+            "orders_per_day": orders_per_day,
+            "revenue": {
+                "today": round(revenue_today, 2),
+                "week": round(revenue_week, 2)
+            },
+            "avg_processing_time": round(avg_processing_minutes, 1),
+            "problem_orders": problem_count,
+            "top_webshops": top_webshops_list,
+            "prev_week": {
+                "orders": prev_week_orders,
+                "shipments": prev_week_shipments
+            }
         }
     
     async def test_connection(self) -> bool:
