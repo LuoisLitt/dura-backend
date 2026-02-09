@@ -83,10 +83,11 @@ class GoedgepicktAPI:
         result = await self._request("GET", "/orders", params=params)
         items = result.get("items", [])
         # Sla pagination info op voor later gebruik
+        page_info = result.get("pageInfo", {})
         self._last_pagination = {
-            "totalItems": result.get("totalItems", result.get("total", 0)),
-            "lastPage": result.get("lastPage", result.get("last_page", 0)),
-            "currentPage": result.get("currentPage", result.get("current_page", page)),
+            "totalItems": page_info.get("totalItems", 0),
+            "lastPage": page_info.get("lastPage", 0),
+            "currentPage": page_info.get("currentPage", page),
             "perPage": limit
         }
         # Fallback sort als API sort niet werkt
