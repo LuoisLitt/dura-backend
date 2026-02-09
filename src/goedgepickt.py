@@ -56,8 +56,8 @@ class GoedgepicktAPI:
         params = {
             "webshopUuid": self.webshop_id,
             "perPage": limit,
-            "sortBy": "createDate",
-            "sortDirection": "desc"
+            "sort[0][field]": "createdAt",
+            "sort[0][direction]": "desc"
         }
         
         if status:
@@ -68,7 +68,10 @@ class GoedgepicktAPI:
             params["createdAtTo"] = date_to.strftime("%Y-%m-%d")
         
         result = await self._request("GET", "/orders", params=params)
-        return result.get("items", [])
+        items = result.get("items", [])
+        # Fallback sort als API sort niet werkt
+        items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+        return items
     
     async def get_order(self, order_uuid: str) -> dict:
         """Haal een specifieke order op."""
@@ -130,7 +133,10 @@ class GoedgepicktAPI:
             params["createdAtFrom"] = date_from.strftime("%Y-%m-%d")
         
         result = await self._request("GET", "/shipments", params=params)
-        return result.get("items", [])
+        items = result.get("items", [])
+        # Sort nieuwste eerst
+        items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
+        return items
     
     async def get_shipment_tracking(self, shipment_uuid: str) -> dict:
         """Haal tracking info voor een verzending op."""
