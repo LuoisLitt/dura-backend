@@ -55,7 +55,9 @@ class GoedgepicktAPI:
         """
         params = {
             "webshopUuid": self.webshop_id,
-            "perPage": limit
+            "perPage": limit,
+            "sortBy": "createDate",
+            "sortDirection": "desc"
         }
         
         if status:
