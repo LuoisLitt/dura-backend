@@ -297,29 +297,43 @@ class GoedgepicktAPI:
             except (ValueError, TypeError):
                 pass
         
-        # Week omzet: haal sample van week orders
-        week_orders_sample = []
-        wp = 1
-        while wp <= 5:
-            items, wpg = await self.get_orders(created_after=week_start, limit=50, page=wp)
-            if not items:
-                break
-            week_orders_sample.extend(items)
-            if wp >= wpg.get("lastPage", 1):
-                break
-            wp += 1
-        
-        for order in week_orders_sample:
-            try:
-                paid = float(order.get("totalPaid", "0") or "0")
-                revenue_week += paid
-            except (ValueError, TypeError):
-                pass
-        
-        # Schaal op als we een sample hebben
-        if len(week_orders_sample) > 0 and orders_week_count > len(week_orders_sample):
-            scale = orders_week_count / len(week_orders_sample)
-            revenue_week = revenue_week * scale
+        # Week omzet: als week_start == vandaag, dan is weekomzet = dagomzet
+        if week_start == today_str:
+            revenue_week = revenue_today
+            # Schaal dagomzet op als we maar een sample hebben
+            if len(today_orders_sample) > 0 and orders_today_count > len(today_orders_sample):
+                scale = orders_today_count / len(today_orders_sample)
+                revenue_today = revenue_today * scale
+                revenue_week = revenue_today
+        else:
+            # Andere dag in de week: haal aparte week sample
+            week_orders_sample = []
+            wp = 1
+            while wp <= 5:
+                items, wpg = await self.get_orders(created_after=week_start, limit=50, page=wp)
+                if not items:
+                    break
+                week_orders_sample.extend(items)
+                if wp >= wpg.get("lastPage", 1):
+                    break
+                wp += 1
+            
+            for order in week_orders_sample:
+                try:
+                    paid = float(order.get("totalPaid", "0") or "0")
+                    revenue_week += paid
+                except (ValueError, TypeError):
+                    pass
+            
+            # Schaal op als we een sample hebben
+            if len(week_orders_sample) > 0 and orders_week_count > len(week_orders_sample):
+                scale = orders_week_count / len(week_orders_sample)
+                revenue_week = revenue_week * scale
+            
+            # Schaal dagomzet ook op
+            if len(today_orders_sample) > 0 and orders_today_count > len(today_orders_sample):
+                scale = orders_today_count / len(today_orders_sample)
+                revenue_today = revenue_today * scale
         
         # === Feature 2: Gemiddelde verwerkingstijd ===
         processing_times = []
