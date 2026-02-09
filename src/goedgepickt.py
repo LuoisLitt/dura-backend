@@ -287,53 +287,35 @@ class GoedgepicktAPI:
                 break
             page += 1
         
-        # === Feature 1: Omzet berekenen ===
-        revenue_today = 0.0
-        revenue_week = 0.0
-        for order in today_orders_sample:
-            try:
-                paid = float(order.get("totalPaid", "0") or "0")
-                revenue_today += paid
-            except (ValueError, TypeError):
-                pass
+        # === Feature 1: Omzet berekenen (EXACT - alle orders ophalen) ===
         
-        # Week omzet: als week_start == vandaag, dan is weekomzet = dagomzet
-        if week_start == today_str:
-            revenue_week = revenue_today
-            # Schaal dagomzet op als we maar een sample hebben
-            if len(today_orders_sample) > 0 and orders_today_count > len(today_orders_sample):
-                scale = orders_today_count / len(today_orders_sample)
-                revenue_today = revenue_today * scale
-                revenue_week = revenue_today
-        else:
-            # Andere dag in de week: haal aparte week sample
-            week_orders_sample = []
-            wp = 1
-            while wp <= 5:
-                items, wpg = await self.get_orders(created_after=week_start, limit=50, page=wp)
+        async def _fetch_all_revenue(created_after: str) -> float:
+            """Haal ALLE orders op en bereken exacte omzet."""
+            total_revenue = 0.0
+            pg = 1
+            max_pg = 200  # safety limit
+            while pg <= max_pg:
+                items, pg_info = await self.get_orders(created_after=created_after, limit=50, page=pg)
                 if not items:
                     break
-                week_orders_sample.extend(items)
-                if wp >= wpg.get("lastPage", 1):
+                for order in items:
+                    try:
+                        paid = float(order.get("totalPaid", "0") or "0")
+                        total_revenue += paid
+                    except (ValueError, TypeError):
+                        pass
+                last_page = pg_info.get("lastPage", 1)
+                if pg >= last_page:
                     break
-                wp += 1
-            
-            for order in week_orders_sample:
-                try:
-                    paid = float(order.get("totalPaid", "0") or "0")
-                    revenue_week += paid
-                except (ValueError, TypeError):
-                    pass
-            
-            # Schaal op als we een sample hebben
-            if len(week_orders_sample) > 0 and orders_week_count > len(week_orders_sample):
-                scale = orders_week_count / len(week_orders_sample)
-                revenue_week = revenue_week * scale
-            
-            # Schaal dagomzet ook op
-            if len(today_orders_sample) > 0 and orders_today_count > len(today_orders_sample):
-                scale = orders_today_count / len(today_orders_sample)
-                revenue_today = revenue_today * scale
+                pg += 1
+            return round(total_revenue, 2)
+        
+        revenue_today = await _fetch_all_revenue(today_str)
+        
+        if week_start == today_str:
+            revenue_week = revenue_today
+        else:
+            revenue_week = await _fetch_all_revenue(week_start)
         
         # === Feature 2: Gemiddelde verwerkingstijd ===
         processing_times = []
