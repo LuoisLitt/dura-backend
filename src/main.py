@@ -211,29 +211,40 @@ async def get_latest_orders(limit: int = 20):
 
 
 @app.get("/api/debug/test-sort")
-async def debug_test_sort(sort_param: str = "", base: str = ""):
-    """Test verschillende sort parameters direct op de Goedgepickt API."""
+async def debug_test_sort(
+    base: str = "",
+    orderBy: str = "",
+    orderByDirection: str = "",
+    createdAfter: str = "",
+    per_page: int = 3,
+    page: int = 1
+):
+    """Test sort parameters direct op de Goedgepickt API."""
     try:
         client = get_client()
         import httpx
         
-        # Probeer fulfilment API als base=fulfilment
         if base == "fulfilment":
-            api_url = "https://account.goedgepickt.nl/api/fulfilment/v1/orders?perPage=3"
+            api_base = "https://account.goedgepickt.nl/api/fulfilment/v1"
         else:
-            api_url = f"{client.BASE_URL}/orders?perPage=3"
+            api_base = client.BASE_URL
         
-        if sort_param:
-            api_url += f"&{sort_param}"
+        params = {"perPage": per_page, "page": page}
+        if orderBy:
+            params["orderBy"] = orderBy
+        if orderByDirection:
+            params["orderByDirection"] = orderByDirection
+        if createdAfter:
+            params["createdAfter"] = createdAfter
         
         async with httpx.AsyncClient() as http:
-            resp = await http.get(api_url, headers=client.headers, timeout=30.0)
+            resp = await http.get(f"{api_base}/orders", headers=client.headers, params=params, timeout=30.0)
             data = resp.json()
         
         items = data.get("items", [])
         page_info = data.get("pageInfo", {})
         compact = [{"date": o.get("createDate", o.get("createdAt",""))[:16], "id": o.get("externalDisplayId", o.get("orderId","")), "status": o.get("status",""), "webshop": o.get("webshopName","")} for o in items]
-        return {"url_used": api_url, "status": resp.status_code, "pageInfo": page_info, "items": compact, "raw_keys": list(items[0].keys()) if items else []}
+        return {"status": resp.status_code, "pageInfo": page_info, "items": compact, "raw_keys": list(items[0].keys()) if items else []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
