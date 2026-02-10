@@ -72,7 +72,7 @@ cache = SimpleCache()
 CACHE_TTL_DASHBOARD = 120   # 2 minuten (warm_cache ververst elke 45s)
 CACHE_TTL_ORDERS = 30       # 30 seconden
 CACHE_TTL_INVENTORY = 120   # 2 minuten
-CACHE_TTL_SHIPMENTS = 30    # 30 seconden
+CACHE_TTL_SHIPMENTS = 90    # 90 seconden (Goedgepickt shipments API is traag)
 
 # Initialize FastAPI
 app = FastAPI(
@@ -291,7 +291,7 @@ async def root():
     return {
         "status": "online",
         "service": "Dura Fulfilment Dashboard API",
-        "version": "3.3.0",
+        "version": "3.4.0",
         "timestamp": datetime.now(tz=CET).isoformat()
     }
 

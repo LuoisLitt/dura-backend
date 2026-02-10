@@ -3,6 +3,7 @@ Goedgepickt API Connector
 Documentatie: https://developers.goedgepickt.nl/
 """
 
+import asyncio
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
@@ -26,7 +27,7 @@ class GoedgepicktAPI:
             "Accept": "application/json"
         }
     
-    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None) -> dict:
+    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None, timeout: float = 10.0) -> dict:
         """Maak een request naar de Goedgepickt API."""
         url = f"{self.BASE_URL}{endpoint}"
         
@@ -37,7 +38,7 @@ class GoedgepicktAPI:
                     headers=self.headers,
                     params=params,
                     json=data,
-                    timeout=30.0
+                    timeout=timeout
                 )
                 response.raise_for_status()
                 return response.json()
@@ -261,82 +262,110 @@ class GoedgepicktAPI:
     
     # ============ STATISTIEKEN ============
     
+    async def _safe_fetch(self, coro, fallback=None, timeout_sec: float = 8.0):
+        """Voer een coroutine uit met timeout en fallback bij failure."""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_sec)
+        except Exception as e:
+            print(f"[SafeFetch] Failed ({type(e).__name__}): {e}")
+            return fallback
+
+    async def _fetch_today_orders_all_pages(self, today_str: str, max_pages: int = 50) -> list:
+        """Haal alle orders van vandaag op (met page limit voor snelheid)."""
+        items_first, pg_info = await self.get_orders(created_after=today_str, limit=50, page=1)
+        if not items_first:
+            return []
+        last_page = pg_info.get("lastPage", 1)
+        all_orders = list(items_first)
+        
+        if last_page > 1:
+            # Fetch remaining pages in parallel (max 5 concurrent)
+            remaining_pages = range(2, min(last_page + 1, max_pages + 1))
+            tasks = [self.get_orders(created_after=today_str, limit=50, page=p) for p in remaining_pages]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, tuple) and len(r) == 2:
+                    all_orders.extend(r[0])
+        return all_orders
+
     async def get_dashboard_stats(self) -> dict:
-        """Verzamel alle statistieken voor het dashboard."""
+        """Verzamel alle statistieken voor het dashboard. Parallel waar mogelijk."""
+        import asyncio
+        
         today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
         week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
-        
-        # Vorige week berekenen
         prev_week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday() + 7)).strftime("%Y-%m-%d")
-        prev_week_end = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
-        # Orders vandaag + deze week + vorige week (sequential - Goedgepickt API rate limits)
-        _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
-        _, week_info = await self.get_orders(created_after=week_start, limit=1, page=1)
-        _, prev_week_info = await self.get_orders(created_after=prev_week_start, limit=1, page=1)
-        prev_week_total = prev_week_info.get("totalItems", 0)
-        this_week_total = week_info.get("totalItems", 0)
-        # prev_week_total is alles SINCE prev_week_start (inclusief deze week), dus we moeten aftrekken
-        prev_week_orders = max(0, prev_week_total - this_week_total)
+        # ========== FASE 1: Parallel basis-counts ophalen ==========
+        async def fetch_today_count():
+            _, info = await self.get_orders(created_after=today_str, limit=1, page=1)
+            return info.get("totalItems", 0)
         
-        orders_today_count = today_info.get("totalItems", 0)
-        orders_week_count = this_week_total
+        async def fetch_week_count():
+            _, info = await self.get_orders(created_after=week_start, limit=1, page=1)
+            return info.get("totalItems", 0)
         
-        # Status verdeling + extra data: tel over ALLE orders van vandaag (sequential)
+        async def fetch_prev_week_count():
+            _, info = await self.get_orders(created_after=prev_week_start, limit=1, page=1)
+            return info.get("totalItems", 0)
+        
+        async def fetch_ship_today():
+            _, info = await self.get_shipments(created_after=today_str, limit=1, page=1)
+            return info.get("totalItems", 0)
+        
+        async def fetch_ship_week():
+            _, info = await self.get_shipments(created_after=week_start, limit=1, page=1)
+            return info.get("totalItems", 0)
+        
+        async def fetch_prev_ship():
+            _, info = await self.get_shipments(created_after=prev_week_start, limit=1, page=1)
+            return info.get("totalItems", 0)
+        
+        async def fetch_today_orders():
+            return await self._fetch_today_orders_all_pages(today_str, max_pages=50)
+        
+        # Alles parallel
+        (
+            orders_today_count,
+            orders_week_count,
+            prev_week_total,
+            shipments_today_count,
+            shipments_week_count,
+            prev_ship_total,
+            today_orders_sample,
+        ) = await asyncio.gather(
+            self._safe_fetch(fetch_today_count(), fallback=0),
+            self._safe_fetch(fetch_week_count(), fallback=0),
+            self._safe_fetch(fetch_prev_week_count(), fallback=0),
+            self._safe_fetch(fetch_ship_today(), fallback=0),
+            self._safe_fetch(fetch_ship_week(), fallback=0),
+            self._safe_fetch(fetch_prev_ship(), fallback=0),
+            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=15.0),
+        )
+        
+        prev_week_orders = max(0, (prev_week_total or 0) - (orders_week_count or 0))
+        prev_week_shipments = max(0, (prev_ship_total or 0) - (shipments_week_count or 0))
+        
+        # ========== FASE 2: Bereken stats uit opgehaalde data (CPU only, geen API) ==========
         orders_by_status = {}
-        today_orders_sample = []
-        page = 1
-        max_pages = 200
-        while page <= max_pages:
-            items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
-            if not items:
-                break
-            today_orders_sample.extend(items)
-            for order in items:
-                status = order.get("status", "unknown")
-                orders_by_status[status] = orders_by_status.get(status, 0) + 1
-            last_page = pg_info.get("lastPage", 1)
-            if page >= last_page:
-                break
-            page += 1
-        
-        # === Feature 1: Omzet berekenen (uit reeds opgehaalde orders - geen extra API calls) ===
-        
-        # Bereken omzet vandaag uit today_orders_sample (al opgehaald hierboven)
         revenue_today = 0.0
-        for order in today_orders_sample:
+        processing_times = []
+        problem_count = 0
+        webshop_counts = {}
+        now = datetime.now(tz=CET)
+        
+        for order in (today_orders_sample or []):
+            # Status
+            status = order.get("status", "unknown")
+            orders_by_status[status] = orders_by_status.get(status, 0) + 1
+            
+            # Revenue
             try:
-                paid = float(order.get("totalPaid", "0") or "0")
-                revenue_today += paid
+                revenue_today += float(order.get("totalPaid", "0") or "0")
             except (ValueError, TypeError):
                 pass
-        revenue_today = round(revenue_today, 2)
-        
-        # Week revenue: vandaag + extra pagina's alleen voor niet-vandaag orders (sequential)
-        if week_start == today_str:
-            revenue_week = revenue_today
-        else:
-            week_revenue = 0.0
-            pg = 1
-            max_pg = 200
-            while pg <= max_pg:
-                items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
-                if not items:
-                    break
-                for order in items:
-                    try:
-                        week_revenue += float(order.get("totalPaid", "0") or "0")
-                    except (ValueError, TypeError):
-                        pass
-                last_page = pg_info.get("lastPage", 1)
-                if pg >= last_page:
-                    break
-                pg += 1
-            revenue_week = round(week_revenue, 2)
-        
-        # === Feature 2: Gemiddelde verwerkingstijd ===
-        processing_times = []
-        for order in today_orders_sample:
+            
+            # Processing time
             create_date = order.get("createDate")
             finish_date = order.get("finishDate")
             if create_date and finish_date:
@@ -344,92 +373,92 @@ class GoedgepicktAPI:
                     created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
                     finished = datetime.fromisoformat(finish_date.replace("Z", "+00:00"))
                     diff_minutes = (finished - created).total_seconds() / 60
-                    if 0 < diff_minutes < 10080:  # Max 1 week
+                    if 0 < diff_minutes < 10080:
                         processing_times.append(diff_minutes)
                 except (ValueError, TypeError):
                     pass
-        
-        avg_processing_minutes = 0
-        if processing_times:
-            avg_processing_minutes = sum(processing_times) / len(processing_times)
-        
-        # === Feature 4: Probleem orders ===
-        problem_count = 0
-        now = datetime.now(tz=CET)
-        for order in today_orders_sample:
-            # attentionNeeded flag
-            if order.get("attentionNeeded") == 1 or order.get("attentionNeeded") == "1" or order.get("attentionNeeded") is True:
+            
+            # Problem orders
+            if order.get("attentionNeeded") in (1, "1", True):
                 problem_count += 1
-                continue
-            # Orders ouder dan 4 uur die nog niet afgerond zijn
-            status = order.get("status", "")
-            if status not in ("completed", "delivered", "shipped"):
-                create_date = order.get("createDate")
-                if create_date:
-                    try:
-                        created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
-                        if (now - created).total_seconds() > 4 * 3600:
-                            problem_count += 1
-                    except (ValueError, TypeError):
-                        pass
-        
-        # === Feature 6: Top webshops ===
-        webshop_counts = {}
-        for order in today_orders_sample:
+            elif status not in ("completed", "delivered", "shipped") and create_date:
+                try:
+                    created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
+                    if (now - created).total_seconds() > 4 * 3600:
+                        problem_count += 1
+                except (ValueError, TypeError):
+                    pass
+            
+            # Webshops
             shop = order.get("webshopName", "Onbekend")
             webshop_counts[shop] = webshop_counts.get(shop, 0) + 1
+        
+        revenue_today = round(revenue_today, 2)
+        avg_processing_minutes = round(sum(processing_times) / len(processing_times), 1) if processing_times else 0
         
         top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         top_webshops_list = [{"name": name, "count": count} for name, count in top_webshops]
         
-        # === Verwerkte orders (shipped/completed/delivered) ===
         processed_statuses = {"shipped", "completed", "delivered"}
-        processed_orders = sum(
-            count for status, count in orders_by_status.items()
-            if status in processed_statuses
-        )
+        processed_orders = sum(count for s, count in orders_by_status.items() if s in processed_statuses)
         
-        # Shipments vandaag + deze week
-        _, ship_today_info = await self.get_shipments(created_after=today_str, limit=1, page=1)
-        _, ship_week_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
-        shipments_today_count = ship_today_info.get("totalItems", 0)
-        shipments_week_count = ship_week_info.get("totalItems", 0)
+        # ========== FASE 3: Week revenue + orders per dag (parallel) ==========
+        # Week revenue
+        if week_start == today_str:
+            revenue_week = revenue_today
+        else:
+            async def fetch_week_revenue():
+                total = 0.0
+                pg = 1
+                while pg <= 50:
+                    items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
+                    if not items:
+                        break
+                    for o in items:
+                        try:
+                            total += float(o.get("totalPaid", "0") or "0")
+                        except (ValueError, TypeError):
+                            pass
+                    if pg >= pg_info.get("lastPage", 1):
+                        break
+                    pg += 1
+                return round(total, 2)
+            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=revenue_today, timeout_sec=12.0)
         
-        # Vorige week shipments
-        _, prev_ship_info = await self.get_shipments(created_after=prev_week_start, limit=1, page=1)
-        prev_ship_total = prev_ship_info.get("totalItems", 0)
-        prev_week_shipments = max(0, prev_ship_total - shipments_week_count)
-        
-        # Orders per dag deze week (voor chart)
-        orders_per_day = {}
+        # Orders per dag — parallel fetch voor elke dag
         current = datetime.strptime(week_start, "%Y-%m-%d")
         today_dt = datetime.now(tz=CET)
+        day_strs = []
         while current <= today_dt:
-            day_str = current.strftime("%Y-%m-%d")
-            next_day = current + timedelta(days=1)
-            _, day_info = await self.get_orders(created_after=day_str, limit=1, page=1)
-            day_total = day_info.get("totalItems", 0)
-            # Subtract next days if possible (createdAfter is inclusive)
-            orders_per_day[day_str] = day_total
-            current = next_day
+            day_strs.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        
+        async def fetch_day_count(day_str):
+            _, info = await self.get_orders(created_after=day_str, limit=1, page=1)
+            return (day_str, info.get("totalItems", 0))
+        
+        day_results = await asyncio.gather(
+            *[self._safe_fetch(fetch_day_count(d), fallback=(d, 0)) for d in day_strs]
+        )
+        orders_per_day = {d: c for d, c in day_results if d is not None}
         
         return {
             "orders": {
-                "today": orders_today_count,
-                "week": orders_week_count,
+                "today": orders_today_count or 0,
+                "week": orders_week_count or 0,
                 "by_status": orders_by_status,
                 "processed": processed_orders
             },
             "shipments": {
-                "today": shipments_today_count,
-                "week": shipments_week_count
+                "today": shipments_today_count or 0,
+                "week": shipments_week_count or 0
             },
             "orders_per_day": orders_per_day,
             "revenue": {
                 "today": round(revenue_today, 2),
                 "week": round(revenue_week, 2)
             },
-            "avg_processing_time": round(avg_processing_minutes, 1),
+            "avg_processing_time": avg_processing_minutes,
             "problem_orders": problem_count,
             "top_webshops": top_webshops_list,
             "prev_week": {
