@@ -323,7 +323,7 @@ class GoedgepicktAPI:
             return info.get("totalItems", 0)
         
         async def fetch_today_orders():
-            return await self._fetch_today_orders_all_pages(today_str, max_pages=5)
+            return await self._fetch_today_orders_all_pages(today_str, max_pages=50)
         
         # Alles parallel
         (
