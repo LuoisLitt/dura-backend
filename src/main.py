@@ -271,6 +271,19 @@ async def refresh_ai_insights():
     return {"success": True, "data": get_cached_insights()}
 
 
+@app.get("/api/ai-insights/debug")
+async def debug_ai_insights():
+    """Debug endpoint om env vars te checken."""
+    claude_key = os.getenv("CLAUDE_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    return {
+        "claude_key_set": bool(claude_key),
+        "claude_key_prefix": claude_key[:15] + "..." if claude_key else None,
+        "anthropic_key_set": bool(anthropic_key),
+        "anthropic_key_prefix": anthropic_key[:15] + "..." if anthropic_key else None,
+    }
+
+
 # ============ HEALTH CHECK ============
 
 @app.get("/")
