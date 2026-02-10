@@ -10,8 +10,14 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 import os
 
-# Limit concurrent Goedgepickt API calls to avoid rate limiting
-_api_semaphore = asyncio.Semaphore(5)
+# Semaphore initialized lazily per event loop
+_api_semaphore = None
+
+def _get_semaphore():
+    global _api_semaphore
+    if _api_semaphore is None:
+        _api_semaphore = asyncio.Semaphore(5)
+    return _api_semaphore
 
 CET = ZoneInfo("Europe/Amsterdam")
 
@@ -34,7 +40,7 @@ class GoedgepicktAPI:
         """Maak een request naar de Goedgepickt API (max 5 concurrent)."""
         url = f"{self.BASE_URL}{endpoint}"
         
-        async with _api_semaphore:
+        async with _get_semaphore():
             async with httpx.AsyncClient() as client:
                 response = await client.request(
                     method=method,
