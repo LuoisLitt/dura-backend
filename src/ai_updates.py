@@ -28,7 +28,8 @@ def get_cached_insights() -> dict:
         return {
             "status": "pending",
             "message": "AI insights worden gegenereerd bij de volgende geplande run (08:30, 13:00, 17:30 CET).",
-            "generated_at": None
+            "generated_at": None,
+            "error": _ai_cache.get("error")
         }
     return {
         "status": "ok",
