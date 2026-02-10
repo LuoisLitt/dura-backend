@@ -179,13 +179,20 @@ class GoedgepicktAPI:
             for p in items:
                 stock = self._safe_stock(p.get("stock", p.get("stockLevel", 0)))
                 if stock <= threshold:
-                    low_stock.append(p)
+                    low_stock.append({
+                        "uuid": p.get("uuid"),
+                        "sku": p.get("sku"),
+                        "name": p.get("name"),
+                        "stock": stock,
+                        "minimalStock": p.get("stock", {}).get("minimalStock", 0) if isinstance(p.get("stock"), dict) else 0,
+                        "picture": p.get("picture"),
+                    })
             last_page = page_info.get("lastPage", 1)
             if page >= last_page:
                 break
             page += 1
         # Sort: lowest stock first
-        low_stock.sort(key=lambda p: self._safe_stock(p.get("stock", p.get("stockLevel", 0))))
+        low_stock.sort(key=lambda p: p.get("stock", 0))
         return low_stock
     
     # ============ VERZENDINGEN ============
