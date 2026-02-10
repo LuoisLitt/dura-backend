@@ -377,9 +377,7 @@ class GoedgepicktAPI:
                 if create_date:
                     try:
                         created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
-                        # Maak offset-naive voor vergelijking
-                        created_naive = created.replace(tzinfo=None)
-                        if (now - created_naive).total_seconds() > 4 * 3600:
+                        if (now - created).total_seconds() > 4 * 3600:
                             problem_count += 1
                     except (ValueError, TypeError):
                         pass
