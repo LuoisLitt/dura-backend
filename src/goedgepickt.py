@@ -160,6 +160,18 @@ class GoedgepicktAPI:
         """Haal een specifiek product op."""
         return await self._request("GET", f"/products/{product_uuid}")
     
+    @staticmethod
+    def _safe_stock(val) -> int:
+        """Convert stock value to int safely (API soms retourneert dict/str)."""
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return 0
+        return 0
+
     async def get_low_stock_products(self, threshold: int = 25) -> list:
         """Haal producten met lage voorraad op (scan alle pagina's)."""
         low_stock = []
@@ -170,7 +182,7 @@ class GoedgepicktAPI:
             if not items:
                 break
             for p in items:
-                stock = p.get("stock", p.get("stockLevel", 0)) or 0
+                stock = self._safe_stock(p.get("stock", p.get("stockLevel", 0)))
                 if stock <= threshold:
                     low_stock.append(p)
             last_page = page_info.get("lastPage", 1)
@@ -178,7 +190,7 @@ class GoedgepicktAPI:
                 break
             page += 1
         # Sort: lowest stock first
-        low_stock.sort(key=lambda p: p.get("stock", p.get("stockLevel", 0)) or 0)
+        low_stock.sort(key=lambda p: self._safe_stock(p.get("stock", p.get("stockLevel", 0))))
         return low_stock
     
     # ============ VERZENDINGEN ============
