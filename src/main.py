@@ -6,8 +6,11 @@ API server die Goedgepickt data beschikbaar maakt voor het dashboard.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 import os
+
+CET = ZoneInfo("Europe/Amsterdam")
 import time
 import asyncio
 from dotenv import load_dotenv
@@ -87,7 +90,7 @@ async def warm_cache():
     while True:
         try:
             client = get_client()
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
             
             # Dashboard stats
             stats = await client.get_dashboard_stats()
@@ -147,7 +150,7 @@ async def get_page_data(page: str):
     """Gecombineerd endpoint: alle data voor een pagina in één call. Veel sneller dan losse calls."""
     try:
         client = get_client()
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
         result = {}
         
         if page == "dashboard":
@@ -245,7 +248,7 @@ async def get_page_data(page: str):
             raise HTTPException(status_code=400, detail=f"Unknown page: {page}")
         
         result["cached"] = True
-        result["timestamp"] = datetime.now().isoformat()
+        result["timestamp"] = datetime.now(tz=CET).isoformat()
         return {"success": True, "data": result}
     except HTTPException:
         raise
@@ -276,7 +279,7 @@ async def root():
         "status": "online",
         "service": "Dura Fulfilment Dashboard API",
         "version": "2.1.0",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(tz=CET).isoformat()
     }
 
 
@@ -291,7 +294,7 @@ async def health_check():
     return {
         "status": "healthy" if gp_connected else "degraded",
         "goedgepickt_connected": gp_connected,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(tz=CET).isoformat()
     }
 
 
@@ -323,7 +326,7 @@ async def get_dashboard():
             "success": True,
             "data": stats,
             "cached": cache.get("dashboard") is not None,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(tz=CET).isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -555,7 +558,7 @@ async def get_pick_stats():
         cache_key = "pick_stats_today"
         async def fetch():
             client = get_client()
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today = datetime.now(tz=CET).replace(hour=0, minute=0, second=0, microsecond=0)
             picks = await client.get_picks(date_from=today)
             users = await client.get_users()
             

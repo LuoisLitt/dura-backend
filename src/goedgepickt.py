@@ -6,7 +6,10 @@ Documentatie: https://developers.goedgepickt.nl/
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 import os
+
+CET = ZoneInfo("Europe/Amsterdam")
 
 
 class GoedgepicktAPI:
@@ -90,7 +93,7 @@ class GoedgepicktAPI:
     async def get_latest_orders(self, limit: int = 50) -> list:
         """Haal de nieuwste orders op via createdAfter + laatste pagina."""
         # Stap 1: Zoek orders van afgelopen 7 dagen
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_ago = (datetime.now(tz=CET) - timedelta(days=7)).strftime("%Y-%m-%d")
         items, page_info = await self.get_orders(created_after=week_ago, limit=50, page=1)
         
         last_page = page_info.get("lastPage", 1)
@@ -198,7 +201,7 @@ class GoedgepicktAPI:
     
     async def get_latest_shipments(self, limit: int = 50) -> list:
         """Haal nieuwste verzendingen op."""
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_ago = (datetime.now(tz=CET) - timedelta(days=7)).strftime("%Y-%m-%d")
         items, page_info = await self.get_shipments(created_after=week_ago, limit=50, page=1)
         
         last_page = page_info.get("lastPage", 1)
@@ -248,12 +251,12 @@ class GoedgepicktAPI:
     
     async def get_dashboard_stats(self) -> dict:
         """Verzamel alle statistieken voor het dashboard."""
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
+        week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
         # Vorige week berekenen
-        prev_week_start = (datetime.now() - timedelta(days=datetime.now().weekday() + 7)).strftime("%Y-%m-%d")
-        prev_week_end = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        prev_week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday() + 7)).strftime("%Y-%m-%d")
+        prev_week_end = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
         # Orders vandaag + deze week (alleen counts via page=1 limit=1)
         _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
@@ -269,11 +272,11 @@ class GoedgepicktAPI:
         orders_today_count = today_info.get("totalItems", 0)
         orders_week_count = this_week_total
         
-        # Status verdeling + extra data: tel over orders van vandaag (max 5 pagina's voor snelheid)
+        # Status verdeling + extra data: tel over ALLE orders van vandaag
         orders_by_status = {}
         today_orders_sample = []  # Bewaar orders voor extra berekeningen
         page = 1
-        max_pages = 5
+        max_pages = 200
         while page <= max_pages:
             items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
             if not items:
@@ -338,7 +341,7 @@ class GoedgepicktAPI:
         
         # === Feature 4: Probleem orders ===
         problem_count = 0
-        now = datetime.now()
+        now = datetime.now(tz=CET)
         for order in today_orders_sample:
             # attentionNeeded flag
             if order.get("attentionNeeded") == 1 or order.get("attentionNeeded") == "1" or order.get("attentionNeeded") is True:
@@ -367,6 +370,13 @@ class GoedgepicktAPI:
         top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         top_webshops_list = [{"name": name, "count": count} for name, count in top_webshops]
         
+        # === Verwerkte orders (shipped/completed/delivered) ===
+        processed_statuses = {"shipped", "completed", "delivered"}
+        processed_orders = sum(
+            count for status, count in orders_by_status.items()
+            if status in processed_statuses
+        )
+        
         # Shipments vandaag + deze week
         _, ship_today_info = await self.get_shipments(created_after=today_str, limit=1, page=1)
         _, ship_week_info = await self.get_shipments(created_after=week_start, limit=1, page=1)
@@ -381,7 +391,7 @@ class GoedgepicktAPI:
         # Orders per dag deze week (voor chart)
         orders_per_day = {}
         current = datetime.strptime(week_start, "%Y-%m-%d")
-        today_dt = datetime.now()
+        today_dt = datetime.now(tz=CET)
         while current <= today_dt:
             day_str = current.strftime("%Y-%m-%d")
             next_day = current + timedelta(days=1)
@@ -395,7 +405,8 @@ class GoedgepicktAPI:
             "orders": {
                 "today": orders_today_count,
                 "week": orders_week_count,
-                "by_status": orders_by_status
+                "by_status": orders_by_status,
+                "processed": processed_orders
             },
             "shipments": {
                 "today": shipments_today_count,
