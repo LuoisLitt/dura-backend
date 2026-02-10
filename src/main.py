@@ -13,6 +13,7 @@ import asyncio
 from dotenv import load_dotenv
 
 from goedgepickt import get_client, GoedgepicktAPI
+from ai_updates import get_cached_insights, generate_insights, setup_scheduler
 
 # Load environment variables
 load_dotenv()
@@ -122,6 +123,11 @@ async def warm_cache():
 async def startup_event():
     global _warm_task
     _warm_task = asyncio.create_task(warm_cache())
+    # Start AI insights scheduler
+    try:
+        setup_scheduler(app)
+    except Exception as e:
+        print(f"AI Scheduler setup failed (non-fatal): {e}")
 
 # CORS configuratie
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -245,6 +251,21 @@ async def get_page_data(page: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ AI INSIGHTS ============
+
+@app.get("/api/ai-insights")
+async def get_ai_insights():
+    """Haal de laatste AI-gegenereerde insights op."""
+    return {"success": True, "data": get_cached_insights()}
+
+
+@app.post("/api/ai-insights/refresh")
+async def refresh_ai_insights():
+    """Forceer een nieuwe AI insights generatie."""
+    await generate_insights()
+    return {"success": True, "data": get_cached_insights()}
 
 
 # ============ HEALTH CHECK ============
