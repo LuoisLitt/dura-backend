@@ -411,7 +411,8 @@ class GoedgepicktAPI:
             async def fetch_week_revenue():
                 total = 0.0
                 pg = 1
-                while pg <= 20:
+                max_pages = 50  # Was 20, maar 1000+ orders/week = 20+ pages
+                while pg <= max_pages:
                     items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
                     if not items:
                         break
@@ -420,11 +421,13 @@ class GoedgepicktAPI:
                             total += float(o.get("totalPaid", "0") or "0")
                         except (ValueError, TypeError):
                             pass
-                    if pg >= pg_info.get("lastPage", 1):
+                    last_page = pg_info.get("lastPage", 1)
+                    if pg >= last_page:
                         break
                     pg += 1
+                print(f"[Dashboard] Week revenue: €{total:.2f} from {pg} pages")
                 return round(total, 2)
-            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=None, timeout_sec=15.0)
+            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=None, timeout_sec=45.0)
             if revenue_week is None:
                 # Fallback: tel revenue_today, maar log warning
                 print("[Dashboard] WARN: week revenue fetch failed, falling back to today revenue")
