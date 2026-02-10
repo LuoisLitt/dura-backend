@@ -79,7 +79,17 @@ async def generate_insights():
         
         # Lage voorraad
         low_stock = await client.get_low_stock_products(threshold=25)
-        critical_stock = [p for p in low_stock if (p.get("stock", 0) or 0) <= 5]
+        def _get_stock_int(p):
+            s = p.get("stock", 0)
+            if isinstance(s, (int, float)):
+                return s
+            if isinstance(s, str):
+                try:
+                    return int(s)
+                except ValueError:
+                    return 0
+            return 0
+        critical_stock = [p for p in low_stock if _get_stock_int(p) <= 5]
         
         # Bouw context voor Claude
         now = datetime.now()
