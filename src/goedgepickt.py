@@ -3,21 +3,11 @@ Goedgepickt API Connector
 Documentatie: https://developers.goedgepickt.nl/
 """
 
-import asyncio
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 import os
-
-# Semaphore initialized lazily per event loop
-_api_semaphore = None
-
-def _get_semaphore():
-    global _api_semaphore
-    if _api_semaphore is None:
-        _api_semaphore = asyncio.Semaphore(5)
-    return _api_semaphore
 
 CET = ZoneInfo("Europe/Amsterdam")
 
@@ -37,11 +27,10 @@ class GoedgepicktAPI:
         }
     
     async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None) -> dict:
-        """Maak een request naar de Goedgepickt API (max 5 concurrent)."""
+        """Maak een request naar de Goedgepickt API."""
         url = f"{self.BASE_URL}{endpoint}"
         
-        async with _get_semaphore():
-            async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient() as client:
                 response = await client.request(
                     method=method,
                     url=url,
@@ -281,12 +270,10 @@ class GoedgepicktAPI:
         prev_week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday() + 7)).strftime("%Y-%m-%d")
         prev_week_end = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
-        # Orders vandaag + deze week + vorige week (parallel)
-        (_, today_info), (_, week_info), (_, prev_week_info) = await asyncio.gather(
-            self.get_orders(created_after=today_str, limit=1, page=1),
-            self.get_orders(created_after=week_start, limit=1, page=1),
-            self.get_orders(created_after=prev_week_start, limit=1, page=1),
-        )
+        # Orders vandaag + deze week + vorige week (sequential - Goedgepickt API rate limits)
+        _, today_info = await self.get_orders(created_after=today_str, limit=1, page=1)
+        _, week_info = await self.get_orders(created_after=week_start, limit=1, page=1)
+        _, prev_week_info = await self.get_orders(created_after=prev_week_start, limit=1, page=1)
         prev_week_total = prev_week_info.get("totalItems", 0)
         this_week_total = week_info.get("totalItems", 0)
         # prev_week_total is alles SINCE prev_week_start (inclusief deze week), dus we moeten aftrekken
@@ -295,25 +282,23 @@ class GoedgepicktAPI:
         orders_today_count = today_info.get("totalItems", 0)
         orders_week_count = this_week_total
         
-        # Status verdeling + extra data: tel over ALLE orders van vandaag (parallel fetch)
+        # Status verdeling + extra data: tel over ALLE orders van vandaag (sequential)
         orders_by_status = {}
         today_orders_sample = []
-        # First get page 1 to know total pages
-        items_p1, pg_info_p1 = await self.get_orders(created_after=today_str, limit=50, page=1)
-        if items_p1:
-            today_orders_sample.extend(items_p1)
-            last_page = pg_info_p1.get("lastPage", 1)
-            # Fetch remaining pages in parallel
-            if last_page > 1:
-                remaining = await asyncio.gather(
-                    *[self.get_orders(created_after=today_str, limit=50, page=p) for p in range(2, min(last_page + 1, 201))]
-                )
-                for items, _ in remaining:
-                    if items:
-                        today_orders_sample.extend(items)
-        for order in today_orders_sample:
-            status = order.get("status", "unknown")
-            orders_by_status[status] = orders_by_status.get(status, 0) + 1
+        page = 1
+        max_pages = 200
+        while page <= max_pages:
+            items, pg_info = await self.get_orders(created_after=today_str, limit=50, page=page)
+            if not items:
+                break
+            today_orders_sample.extend(items)
+            for order in items:
+                status = order.get("status", "unknown")
+                orders_by_status[status] = orders_by_status.get(status, 0) + 1
+            last_page = pg_info.get("lastPage", 1)
+            if page >= last_page:
+                break
+            page += 1
         
         # === Feature 1: Omzet berekenen (uit reeds opgehaalde orders - geen extra API calls) ===
         
@@ -327,30 +312,26 @@ class GoedgepicktAPI:
                 pass
         revenue_today = round(revenue_today, 2)
         
-        # Week revenue: vandaag + extra pagina's alleen voor niet-vandaag orders (parallel)
+        # Week revenue: vandaag + extra pagina's alleen voor niet-vandaag orders (sequential)
         if week_start == today_str:
             revenue_week = revenue_today
         else:
             week_revenue = 0.0
-            items_w1, pg_info_w1 = await self.get_orders(created_after=week_start, limit=50, page=1)
-            if items_w1:
-                for order in items_w1:
+            pg = 1
+            max_pg = 200
+            while pg <= max_pg:
+                items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
+                if not items:
+                    break
+                for order in items:
                     try:
                         week_revenue += float(order.get("totalPaid", "0") or "0")
                     except (ValueError, TypeError):
                         pass
-                last_page_w = pg_info_w1.get("lastPage", 1)
-                if last_page_w > 1:
-                    remaining_w = await asyncio.gather(
-                        *[self.get_orders(created_after=week_start, limit=50, page=p) for p in range(2, min(last_page_w + 1, 201))]
-                    )
-                    for items, _ in remaining_w:
-                        if items:
-                            for order in items:
-                                try:
-                                    week_revenue += float(order.get("totalPaid", "0") or "0")
-                                except (ValueError, TypeError):
-                                    pass
+                last_page = pg_info.get("lastPage", 1)
+                if pg >= last_page:
+                    break
+                pg += 1
             revenue_week = round(week_revenue, 2)
         
         # === Feature 2: Gemiddelde verwerkingstijd ===
