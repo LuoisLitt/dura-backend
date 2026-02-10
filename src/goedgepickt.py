@@ -101,25 +101,10 @@ class GoedgepicktAPI:
         return items, page_info
     
     async def get_latest_orders(self, limit: int = 50) -> list:
-        """Haal de nieuwste orders op via createdAfter + laatste pagina."""
-        # Stap 1: Zoek orders van afgelopen 7 dagen
-        week_ago = (datetime.now(tz=CET) - timedelta(days=7)).strftime("%Y-%m-%d")
-        items, page_info = await self.get_orders(created_after=week_ago, limit=50, page=1)
-        
-        last_page = page_info.get("lastPage", 1)
-        total = page_info.get("totalItems", 0)
-        
-        if last_page <= 1:
-            items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
-            return items[:limit]
-        
-        # Stap 2: Haal de laatste pagina op (daar zitten de nieuwste)
-        items, _ = await self.get_orders(created_after=week_ago, limit=50, page=last_page)
-        
-        # Stap 3: Als er ook een voorlaatste pagina is, pak die ook
-        if last_page > 1:
-            items2, _ = await self.get_orders(created_after=week_ago, limit=50, page=last_page - 1)
-            items = items2 + items
+        """Haal de nieuwste orders op - snel, max 1 API call."""
+        # Alleen vandaag ophalen, dat is snel genoeg voor "recente orders"
+        today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
+        items, page_info = await self.get_orders(created_after=today_str, limit=50, page=1)
         
         items.sort(key=lambda x: x.get("createDate", ""), reverse=True)
         return items[:limit]

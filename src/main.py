@@ -70,7 +70,7 @@ cache = SimpleCache()
 
 # Cache TTLs
 CACHE_TTL_DASHBOARD = 120   # 2 minuten (warm_cache ververst elke 45s)
-CACHE_TTL_ORDERS = 30       # 30 seconden
+CACHE_TTL_ORDERS = 90       # 90 seconden (was 30, verhoogd voor snelheid)
 CACHE_TTL_INVENTORY = 120   # 2 minuten
 CACHE_TTL_SHIPMENTS = 90    # 90 seconden (Goedgepickt shipments API is traag)
 
