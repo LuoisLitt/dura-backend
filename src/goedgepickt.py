@@ -3,11 +3,15 @@ Goedgepickt API Connector
 Documentatie: https://developers.goedgepickt.nl/
 """
 
+import asyncio
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 import os
+
+# Limit concurrent Goedgepickt API calls to avoid rate limiting
+_api_semaphore = asyncio.Semaphore(5)
 
 CET = ZoneInfo("Europe/Amsterdam")
 
@@ -27,20 +31,21 @@ class GoedgepicktAPI:
         }
     
     async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None) -> dict:
-        """Maak een request naar de Goedgepickt API."""
+        """Maak een request naar de Goedgepickt API (max 5 concurrent)."""
         url = f"{self.BASE_URL}{endpoint}"
         
-        async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=self.headers,
-                params=params,
-                json=data,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+        async with _api_semaphore:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    params=params,
+                    json=data,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                return response.json()
     
     # ============ WEBSHOPS ============
     
@@ -271,7 +276,6 @@ class GoedgepicktAPI:
         prev_week_end = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
         # Orders vandaag + deze week + vorige week (parallel)
-        import asyncio
         (_, today_info), (_, week_info), (_, prev_week_info) = await asyncio.gather(
             self.get_orders(created_after=today_str, limit=1, page=1),
             self.get_orders(created_after=week_start, limit=1, page=1),

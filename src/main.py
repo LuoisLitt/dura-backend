@@ -69,7 +69,7 @@ class SimpleCache:
 cache = SimpleCache()
 
 # Cache TTLs
-CACHE_TTL_DASHBOARD = 60    # 60 seconden
+CACHE_TTL_DASHBOARD = 120   # 2 minuten (warm_cache ververst elke 45s)
 CACHE_TTL_ORDERS = 30       # 30 seconden
 CACHE_TTL_INVENTORY = 120   # 2 minuten
 CACHE_TTL_SHIPMENTS = 30    # 30 seconden
