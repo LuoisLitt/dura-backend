@@ -55,8 +55,10 @@ async def generate_insights():
         client = get_client()
         
         # Verzamel data
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+        from zoneinfo import ZoneInfo
+        CET = ZoneInfo("Europe/Amsterdam")
+        today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
+        week_start = (datetime.now(tz=CET) - timedelta(days=datetime.now(tz=CET).weekday())).strftime("%Y-%m-%d")
         
         # Orders vandaag
         _, today_info = await client.get_orders(created_after=today_str, limit=1, page=1)

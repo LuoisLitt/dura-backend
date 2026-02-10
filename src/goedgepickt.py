@@ -411,7 +411,7 @@ class GoedgepicktAPI:
             async def fetch_week_revenue():
                 total = 0.0
                 pg = 1
-                while pg <= 5:
+                while pg <= 20:
                     items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
                     if not items:
                         break
@@ -424,7 +424,11 @@ class GoedgepicktAPI:
                         break
                     pg += 1
                 return round(total, 2)
-            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=revenue_today, timeout_sec=6.0)
+            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=None, timeout_sec=15.0)
+            if revenue_week is None:
+                # Fallback: tel revenue_today, maar log warning
+                print("[Dashboard] WARN: week revenue fetch failed, falling back to today revenue")
+                revenue_week = revenue_today
         
         # Orders per dag — parallel fetch voor elke dag
         current = datetime.strptime(week_start, "%Y-%m-%d").replace(tzinfo=CET)
