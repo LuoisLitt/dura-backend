@@ -44,8 +44,10 @@ async def generate_insights():
     
     api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        _ai_cache["error"] = "CLAUDE_API_KEY niet geconfigureerd"
-        print("[AI Insights] ERROR: No API key found")
+        error_msg = "CLAUDE_API_KEY niet geconfigureerd"
+        _ai_cache["error"] = error_msg
+        print(f"[AI Insights] ERROR: {error_msg}")
+        print(f"[AI Insights] Env vars check: CLAUDE_API_KEY={os.getenv('CLAUDE_API_KEY')}, ANTHROPIC_API_KEY={os.getenv('ANTHROPIC_API_KEY')}")
         return
     
     try:
