@@ -291,7 +291,7 @@ async def root():
     return {
         "status": "online",
         "service": "Dura Fulfilment Dashboard API",
-        "version": "2.1.0",
+        "version": "3.1.0",
         "timestamp": datetime.now(tz=CET).isoformat()
     }
 
