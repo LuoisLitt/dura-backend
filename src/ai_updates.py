@@ -80,7 +80,7 @@ async def generate_insights():
         
         # Bouw context voor Claude
         now = datetime.now()
-        hour = now.getHours() if hasattr(now, 'getHours') else now.hour
+        hour = now.hour
         time_of_day = "ochtend" if hour < 12 else "middag" if hour < 18 else "avond"
         
         data_summary = f"""
