@@ -409,25 +409,40 @@ class GoedgepicktAPI:
             revenue_week = revenue_today
         else:
             async def fetch_week_revenue():
+                # Page 1 first to get lastPage
+                items_first, pg_info = await self.get_orders(created_after=week_start, limit=50, page=1)
+                if not items_first:
+                    print("[Dashboard] Week revenue: €0.00 from 0 pages")
+                    return 0.0
+                
                 total = 0.0
-                pg = 1
-                max_pages = 50  # Was 20, maar 1000+ orders/week = 20+ pages
-                while pg <= max_pages:
-                    items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
-                    if not items:
-                        break
-                    for o in items:
-                        try:
-                            total += float(o.get("totalPaid", "0") or "0")
-                        except (ValueError, TypeError):
-                            pass
-                    last_page = pg_info.get("lastPage", 1)
-                    if pg >= last_page:
-                        break
-                    pg += 1
-                print(f"[Dashboard] Week revenue: €{total:.2f} from {pg} pages")
+                for o in items_first:
+                    try:
+                        total += float(o.get("totalPaid", "0") or "0")
+                    except (ValueError, TypeError):
+                        pass
+                
+                last_page = pg_info.get("lastPage", 1)
+                if last_page > 1:
+                    # Fetch remaining pages IN PARALLEL (max 50 pages)
+                    max_pages = min(last_page, 50)
+                    tasks = [self.get_orders(created_after=week_start, limit=50, page=p)
+                             for p in range(2, max_pages + 1)]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in results:
+                        if isinstance(r, Exception):
+                            print(f"[Dashboard] Week revenue page error: {r}")
+                            continue
+                        items, _ = r
+                        for o in items:
+                            try:
+                                total += float(o.get("totalPaid", "0") or "0")
+                            except (ValueError, TypeError):
+                                pass
+                
+                print(f"[Dashboard] Week revenue: €{total:.2f} from {last_page} pages (parallel)")
                 return round(total, 2)
-            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=None, timeout_sec=45.0)
+            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=None, timeout_sec=60.0)
             if revenue_week is None:
                 # Fallback: tel revenue_today, maar log warning
                 print("[Dashboard] WARN: week revenue fetch failed, falling back to today revenue")
