@@ -33,12 +33,12 @@ class GoedgepicktAPI:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(
                 headers=self.headers,
-                timeout=httpx.Timeout(8.0, connect=3.0),
+                timeout=httpx.Timeout(15.0, connect=5.0),
                 limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
             )
         return self._http_client
     
-    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None, timeout: float = 8.0) -> dict:
+    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None, timeout: float = 15.0) -> dict:
         """Maak een request naar de Goedgepickt API."""
         url = f"{self.BASE_URL}{endpoint}"
         client = self._get_http_client()
@@ -271,7 +271,7 @@ class GoedgepicktAPI:
     
     # ============ STATISTIEKEN ============
     
-    async def _safe_fetch(self, coro, fallback=None, timeout_sec: float = 8.0):
+    async def _safe_fetch(self, coro, fallback=None, timeout_sec: float = 15.0):
         """Voer een coroutine uit met timeout en fallback bij failure."""
         try:
             return await asyncio.wait_for(coro, timeout=timeout_sec)
@@ -349,7 +349,7 @@ class GoedgepicktAPI:
             self._safe_fetch(fetch_ship_today(), fallback=0),
             self._safe_fetch(fetch_ship_week(), fallback=0),
             self._safe_fetch(fetch_prev_ship(), fallback=0),
-            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=8.0),
+            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=15.0),
         )
         
         prev_week_orders = max(0, (prev_week_total or 0) - (orders_week_count or 0))
@@ -435,7 +435,7 @@ class GoedgepicktAPI:
             revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=revenue_today, timeout_sec=6.0)
         
         # Orders per dag — parallel fetch voor elke dag
-        current = datetime.strptime(week_start, "%Y-%m-%d")
+        current = datetime.strptime(week_start, "%Y-%m-%d").replace(tzinfo=CET)
         today_dt = datetime.now(tz=CET)
         day_strs = []
         while current <= today_dt:
