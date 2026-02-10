@@ -302,35 +302,41 @@ class GoedgepicktAPI:
                 break
             page += 1
         
-        # === Feature 1: Omzet berekenen (EXACT - alle orders ophalen) ===
+        # === Feature 1: Omzet berekenen (uit reeds opgehaalde orders - geen extra API calls) ===
         
-        async def _fetch_all_revenue(created_after: str) -> float:
-            """Haal ALLE orders op en bereken exacte omzet."""
-            total_revenue = 0.0
+        # Bereken omzet vandaag uit today_orders_sample (al opgehaald hierboven)
+        revenue_today = 0.0
+        for order in today_orders_sample:
+            try:
+                paid = float(order.get("totalPaid", "0") or "0")
+                revenue_today += paid
+            except (ValueError, TypeError):
+                pass
+        revenue_today = round(revenue_today, 2)
+        
+        # Week revenue: vandaag + extra pagina's alleen voor niet-vandaag orders
+        if week_start == today_str:
+            revenue_week = revenue_today
+        else:
+            # Haal week orders op met limit, bereken revenue incrementeel
+            week_revenue = 0.0
             pg = 1
-            max_pg = 200  # safety limit
+            max_pg = 200
             while pg <= max_pg:
-                items, pg_info = await self.get_orders(created_after=created_after, limit=50, page=pg)
+                items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
                 if not items:
                     break
                 for order in items:
                     try:
                         paid = float(order.get("totalPaid", "0") or "0")
-                        total_revenue += paid
+                        week_revenue += paid
                     except (ValueError, TypeError):
                         pass
                 last_page = pg_info.get("lastPage", 1)
                 if pg >= last_page:
                     break
                 pg += 1
-            return round(total_revenue, 2)
-        
-        revenue_today = await _fetch_all_revenue(today_str)
-        
-        if week_start == today_str:
-            revenue_week = revenue_today
-        else:
-            revenue_week = await _fetch_all_revenue(week_start)
+            revenue_week = round(week_revenue, 2)
         
         # === Feature 2: Gemiddelde verwerkingstijd ===
         processing_times = []
