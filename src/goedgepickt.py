@@ -26,22 +26,31 @@ class GoedgepicktAPI:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        self._http_client: Optional[httpx.AsyncClient] = None
     
-    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None, timeout: float = 10.0) -> dict:
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Hergebruik een enkele httpx client (connection pooling)."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                headers=self.headers,
+                timeout=httpx.Timeout(8.0, connect=3.0),
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+        return self._http_client
+    
+    async def _request(self, method: str, endpoint: str, params: dict = None, data: dict = None, timeout: float = 8.0) -> dict:
         """Maak een request naar de Goedgepickt API."""
         url = f"{self.BASE_URL}{endpoint}"
-        
-        async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    headers=self.headers,
-                    params=params,
-                    json=data,
-                    timeout=timeout
-                )
-                response.raise_for_status()
-                return response.json()
+        client = self._get_http_client()
+        response = await client.request(
+            method=method,
+            url=url,
+            params=params,
+            json=data,
+            timeout=timeout
+        )
+        response.raise_for_status()
+        return response.json()
     
     # ============ WEBSHOPS ============
     
@@ -322,7 +331,7 @@ class GoedgepicktAPI:
             return info.get("totalItems", 0)
         
         async def fetch_today_orders():
-            return await self._fetch_today_orders_all_pages(today_str, max_pages=50)
+            return await self._fetch_today_orders_all_pages(today_str, max_pages=5)
         
         # Alles parallel
         (
@@ -340,7 +349,7 @@ class GoedgepicktAPI:
             self._safe_fetch(fetch_ship_today(), fallback=0),
             self._safe_fetch(fetch_ship_week(), fallback=0),
             self._safe_fetch(fetch_prev_ship(), fallback=0),
-            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=15.0),
+            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=8.0),
         )
         
         prev_week_orders = max(0, (prev_week_total or 0) - (orders_week_count or 0))
@@ -410,7 +419,7 @@ class GoedgepicktAPI:
             async def fetch_week_revenue():
                 total = 0.0
                 pg = 1
-                while pg <= 50:
+                while pg <= 5:
                     items, pg_info = await self.get_orders(created_after=week_start, limit=50, page=pg)
                     if not items:
                         break
@@ -423,7 +432,7 @@ class GoedgepicktAPI:
                         break
                     pg += 1
                 return round(total, 2)
-            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=revenue_today, timeout_sec=12.0)
+            revenue_week = await self._safe_fetch(fetch_week_revenue(), fallback=revenue_today, timeout_sec=6.0)
         
         # Orders per dag — parallel fetch voor elke dag
         current = datetime.strptime(week_start, "%Y-%m-%d")

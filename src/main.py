@@ -156,17 +156,33 @@ async def get_page_data(page: str):
         if page == "dashboard":
             # Dashboard heeft nodig: stats + latest orders + inventory alerts
             async def fetch_stats():
-                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, lambda: client.get_dashboard_stats())
+                return await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, 
+                    lambda: asyncio.wait_for(client.get_dashboard_stats(), timeout=20.0))
             async def fetch_latest():
-                return await cache.get_or_fetch("orders_latest:5", CACHE_TTL_ORDERS, lambda: client.get_latest_orders(limit=5))
+                return await cache.get_or_fetch("orders_latest:5", CACHE_TTL_ORDERS, 
+                    lambda: asyncio.wait_for(client.get_latest_orders(limit=5), timeout=10.0))
             async def fetch_alerts():
-                return await cache.get_or_fetch("inventory_alerts", CACHE_TTL_INVENTORY, lambda: client.get_low_stock_products(threshold=25))
+                return await cache.get_or_fetch("inventory_alerts", CACHE_TTL_INVENTORY, 
+                    lambda: asyncio.wait_for(client.get_low_stock_products(threshold=25), timeout=10.0))
             
-            stats, latest, alerts = await asyncio.gather(fetch_stats(), fetch_latest(), fetch_alerts())
+            try:
+                stats, latest, alerts = await asyncio.wait_for(
+                    asyncio.gather(fetch_stats(), fetch_latest(), fetch_alerts(), return_exceptions=True),
+                    timeout=25.0
+                )
+                # Handle individual failures
+                if isinstance(stats, Exception): stats = cache.get("dashboard") or {}
+                if isinstance(latest, Exception): latest = cache.get("orders_latest:5") or []
+                if isinstance(alerts, Exception): alerts = cache.get("inventory_alerts") or []
+            except asyncio.TimeoutError:
+                stats = cache.get("dashboard") or {}
+                latest = cache.get("orders_latest:5") or []
+                alerts = cache.get("inventory_alerts") or []
+            
             result = {
                 "dashboard": stats,
-                "recentOrders": latest[:5],
-                "inventoryAlerts": alerts[:5]
+                "recentOrders": (latest or [])[:5],
+                "inventoryAlerts": (alerts or [])[:5]
             }
         
         elif page == "orders":
@@ -291,7 +307,7 @@ async def root():
     return {
         "status": "online",
         "service": "Dura Fulfilment Dashboard API",
-        "version": "3.4.0",
+        "version": "3.5.0",
         "timestamp": datetime.now(tz=CET).isoformat()
     }
 
@@ -328,11 +344,11 @@ async def get_webshops():
 
 @app.get("/api/dashboard")
 async def get_dashboard():
-    """Dashboard KPIs: orders vandaag, deze week, status verdeling. Gecached voor 60s."""
+    """Dashboard KPIs: orders vandaag, deze week, status verdeling. Gecached voor 120s."""
     try:
         async def fetch():
             client = get_client()
-            return await client.get_dashboard_stats()
+            return await asyncio.wait_for(client.get_dashboard_stats(), timeout=20.0)
         
         stats = await cache.get_or_fetch("dashboard", CACHE_TTL_DASHBOARD, fetch)
         return {
@@ -341,6 +357,12 @@ async def get_dashboard():
             "cached": cache.get("dashboard") is not None,
             "timestamp": datetime.now(tz=CET).isoformat()
         }
+    except asyncio.TimeoutError:
+        # Return stale cache if available
+        stale = cache.get("dashboard")
+        if stale:
+            return {"success": True, "data": stale, "cached": True, "stale": True, "timestamp": datetime.now(tz=CET).isoformat()}
+        raise HTTPException(status_code=504, detail="Dashboard timeout - Goedgepickt API te traag")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
