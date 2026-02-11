@@ -588,6 +588,12 @@ class GoedgepicktAPI:
                 print(f"[Dashboard] Shipments today: API reported {shipments_today_count}, actual fetched {actual_ship}", flush=True)
                 shipments_today_count = actual_ship
 
+        # GoedGepickt /orders API capt soms op ~500 items, terwijl /shipments alles retourneert.
+        # Elke verzending was een order, dus als shipments > orders, gebruik shipments als minimum.
+        if (shipments_today_count or 0) > (orders_today_count or 0):
+            print(f"[Dashboard] Orders count corrected: {orders_today_count} -> {shipments_today_count} (using shipments count, orders API caps at ~500)", flush=True)
+            orders_today_count = shipments_today_count
+
         # ========== FASE 2: Bereken stats uit opgehaalde data (CPU only, geen API) ==========
         orders_by_status = {}
         revenue_today = 0.0
