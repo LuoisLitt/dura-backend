@@ -671,7 +671,18 @@ class GoedgepicktAPI:
                 cname = raw[:20].title() if raw else "Onbekend"
             carrier_counts[cname] = carrier_counts.get(cname, 0) + 1
         top_carriers = sorted(carrier_counts.items(), key=lambda x: x[1], reverse=True)
-        
+
+        # Shipment status verdeling uit alle shipments van vandaag
+        ship_status_counts = {"delivered": 0, "transit": 0, "other": 0}
+        for s in (today_shipments or []):
+            st = (s.get("status") or "").lower()
+            if st in ("delivered_at_recipient", "delivered"):
+                ship_status_counts["delivered"] += 1
+            elif st in ("shipped", "in_transit", "out_for_delivery", "registered"):
+                ship_status_counts["transit"] += 1
+            else:
+                ship_status_counts["other"] += 1
+
         # ========== FASE 3: Week revenue + orders per dag (parallel) ==========
         # Week revenue
         if week_start == today_str:
@@ -765,6 +776,7 @@ class GoedgepicktAPI:
                 "week": shipments_week_count or 0,
                 "by_carrier": carrier_counts,
                 "top_carriers": [{"name": name, "count": count} for name, count in top_carriers[:10]],
+                "by_status": ship_status_counts,
             },
             "orders_per_day": orders_per_day,
             "revenue": {
