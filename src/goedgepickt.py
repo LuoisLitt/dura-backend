@@ -173,7 +173,7 @@ class GoedgepicktAPI:
             return 0
         return 0
 
-    async def get_in_stock_products(self, max_pages: int = 2500) -> list:
+    async def get_in_stock_products(self, max_pages: int = 2500, on_progress=None) -> list:
         """
         Haal ALLE producten met stock > 0 op door alle pagina's te scannen.
         Batches van 5 concurrent requests met pauze om rate limits te voorkomen.
@@ -219,8 +219,8 @@ class GoedgepicktAPI:
             print(f"[INVENTORY] Done: {len(active)} active from 1 page in {elapsed}s", flush=True)
             return active
 
-        # Batch ophalen: 2 concurrent requests per batch, 2s pauze (voorkom rate limits)
-        BATCH_SIZE = 2
+        # Batch ophalen: 4 concurrent requests per batch, 1s pauze (balans snelheid/rate limits)
+        BATCH_SIZE = 4
         MAX_RETRIES = 3
 
         async def fetch_page_with_retry(page_num: int) -> list:
@@ -231,7 +231,7 @@ class GoedgepicktAPI:
                     return _extract_active(items)
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
-                        wait = 5 * (attempt + 1)  # 5s, 10s, 15s
+                        wait = 3 * (attempt + 1)  # 3s, 6s, 9s
                         if attempt == 0:
                             print(f"[INVENTORY] Rate limited at page {page_num}, waiting {wait}s", flush=True)
                         await asyncio.sleep(wait)
@@ -246,7 +246,6 @@ class GoedgepicktAPI:
             errors += 1
             return []
 
-        # Batches van 5 pagina's tegelijk, 1s pauze tussen batches
         pages = list(range(2, last_page + 1))
         for batch_start in range(0, len(pages), BATCH_SIZE):
             batch = pages[batch_start:batch_start + BATCH_SIZE]
@@ -260,14 +259,17 @@ class GoedgepicktAPI:
                 elif isinstance(r, Exception):
                     errors += 1
 
-            # 2s pauze tussen batches (rate limit budget)
-            await asyncio.sleep(2.0)
+            # 1s pauze tussen batches
+            await asyncio.sleep(1.0)
 
-            # Progress log elke 100 pagina's
+            # Progress tracking + log elke 100 pagina's
             pages_done = batch_start + len(batch)
+            if on_progress:
+                on_progress(pages_done, len(pages), len(active))
             if pages_done % 100 < BATCH_SIZE:
                 elapsed_so_far = round(_time.monotonic() - start, 1)
-                print(f"[INVENTORY] Progress: {pages_done}/{len(pages)} pages, {len(active)} active, {errors} errors ({elapsed_so_far}s)", flush=True)
+                pct = round(pages_done / len(pages) * 100, 1)
+                print(f"[INVENTORY] Progress: {pages_done}/{len(pages)} pages ({pct}%), {len(active)} active, {errors} errors ({elapsed_so_far}s)", flush=True)
                 sys.stdout.flush()
 
         # Sorteer op stock (laagste eerst)

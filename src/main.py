@@ -212,30 +212,37 @@ async def warm_cache():
 
 # ============ INVENTORY INDEXER ============
 
-_inventory_status = {"state": "init", "products": 0, "last_run": None, "error": None}
+_inventory_status = {"state": "init", "products": 0, "last_run": None, "error": None, "progress": 0}
 
 async def index_active_inventory():
     """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
     import sys
     global _inventory_status
-    print("[INVENTORY] Task started, waiting 300s before first run (laat warm_cache eerst draaien)...", flush=True)
+    print("[INVENTORY] Task started, waiting 30s before first run...", flush=True)
     sys.stdout.flush()
     _inventory_status["state"] = "waiting"
-    await asyncio.sleep(300)  # 5 min wachten zodat warm_cache eerst kan draaien zonder rate limits
+    await asyncio.sleep(30)  # 30s wachten zodat warm_cache eerste fetch kan doen
 
     while True:
         try:
-            _inventory_status["state"] = "scanning"
+            _inventory_status.update({"state": "scanning", "progress": 0})
             print("[INVENTORY] Starting scan...", flush=True)
             sys.stdout.flush()
             client = get_client()
-            active = await client.get_in_stock_products()
+
+            # Callback voor progress tracking
+            def on_progress(pages_done, total_pages, active_count):
+                pct = round(pages_done / max(total_pages, 1) * 100)
+                _inventory_status.update({"progress": pct, "products": active_count})
+
+            active = await client.get_in_stock_products(on_progress=on_progress)
             cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
             _inventory_status.update({
                 "state": "ready",
                 "products": len(active),
                 "last_run": datetime.now(tz=CET).isoformat(),
                 "error": None,
+                "progress": 100,
             })
             print(f"[INVENTORY] Cache updated: {len(active)} active products", flush=True)
             sys.stdout.flush()
@@ -341,8 +348,8 @@ async def verify_auth(request: Request, call_next):
     """
     path = request.url.path
 
-    # Skip auth voor health checks, CORS preflight en auth endpoints
-    if not path.startswith("/api/") or request.method == "OPTIONS" or path.startswith("/api/auth/"):
+    # Skip auth voor health checks, CORS preflight, auth endpoints en inventory status
+    if not path.startswith("/api/") or request.method == "OPTIONS" or path.startswith("/api/auth/") or path == "/api/inventory/status":
         return await call_next(request)
 
     # P1.3: POST method whitelist — alleen specifieke endpoints accepteren POST
