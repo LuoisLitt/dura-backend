@@ -167,10 +167,10 @@ class GoedgepicktAPI:
                 return 0
         return 0
 
-    async def get_in_stock_products(self, max_pages: int = 2500, concurrency: int = 5) -> list:
+    async def get_in_stock_products(self, max_pages: int = 2500) -> list:
         """
         Haal ALLE producten met stock > 0 op door alle pagina's te scannen.
-        Gebruikt concurrent requests voor snelheid.
+        Verwerkt in kleine batches met pauze om 429 rate limits te voorkomen.
         Returns lijst met alleen noodzakelijke velden per product.
         """
         import time as _time
@@ -182,59 +182,74 @@ class GoedgepicktAPI:
         total_api = page_info.get("totalItems", 0)
 
         active = []
+        errors = 0
+
+        def _extract_active(items: list) -> list:
+            result = []
+            for p in items:
+                stock = self._safe_stock(p.get("stock", p.get("stockLevel", 0)))
+                if stock > 0:
+                    result.append({
+                        "uuid": p.get("uuid"),
+                        "sku": p.get("sku", ""),
+                        "name": p.get("name", ""),
+                        "stock": stock,
+                        "picture": p.get("picture"),
+                    })
+            return result
 
         # Verwerk eerste pagina
-        for p in items_first:
-            stock = self._safe_stock(p.get("stock", p.get("stockLevel", 0)))
-            if stock > 0:
-                active.append({
-                    "uuid": p.get("uuid"),
-                    "sku": p.get("sku", ""),
-                    "name": p.get("name", ""),
-                    "stock": stock,
-                    "picture": p.get("picture"),
-                })
+        active.extend(_extract_active(items_first))
 
         if last_page <= 1:
             elapsed = round(_time.monotonic() - start, 1)
             print(f"[INVENTORY] Indexed {len(active)} active products from 1 page in {elapsed}s")
             return active
 
-        # Resterende pagina's ophalen in batches van `concurrency`
-        sem = asyncio.Semaphore(concurrency)
+        # Verwerk in batches van 10 pagina's, met 1s pauze ertussen
+        BATCH_SIZE = 10
+        MAX_RETRIES = 3
 
-        async def fetch_page(page_num: int) -> list:
-            async with sem:
+        async def fetch_page_with_retry(page_num: int) -> list:
+            nonlocal errors
+            for attempt in range(MAX_RETRIES):
                 try:
                     items, _ = await self.get_products(limit=50, page=page_num)
-                    result = []
-                    for p in items:
-                        stock = self._safe_stock(p.get("stock", p.get("stockLevel", 0)))
-                        if stock > 0:
-                            result.append({
-                                "uuid": p.get("uuid"),
-                                "sku": p.get("sku", ""),
-                                "name": p.get("name", ""),
-                                "stock": stock,
-                                "picture": p.get("picture"),
-                            })
-                    return result
+                    return _extract_active(items)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:
+                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s...")
+                        await asyncio.sleep(wait)
+                        continue
+                    print(f"[INVENTORY] Page {page_num} HTTP {e.response.status_code}")
+                    errors += 1
+                    return []
                 except Exception as e:
                     print(f"[INVENTORY] Page {page_num} error: {e}")
+                    errors += 1
                     return []
+            print(f"[INVENTORY] Page {page_num} failed after {MAX_RETRIES} retries")
+            errors += 1
+            return []
 
-        # Alle resterende pagina's parallel starten (semaphore regelt concurrency)
-        tasks = [fetch_page(p) for p in range(2, last_page + 1)]
-        results = await asyncio.gather(*tasks)
+        pages_remaining = list(range(2, last_page + 1))
+        for batch_start in range(0, len(pages_remaining), BATCH_SIZE):
+            batch = pages_remaining[batch_start:batch_start + BATCH_SIZE]
+            tasks = [fetch_page_with_retry(p) for p in batch]
+            results = await asyncio.gather(*tasks)
+            for page_results in results:
+                active.extend(page_results)
 
-        for page_results in results:
-            active.extend(page_results)
+            # Pauze tussen batches om rate limit te vermijden
+            if batch_start + BATCH_SIZE < len(pages_remaining):
+                await asyncio.sleep(1.0)
 
         # Sorteer op stock (laagste eerst)
         active.sort(key=lambda p: p["stock"])
 
         elapsed = round(_time.monotonic() - start, 1)
-        print(f"[INVENTORY] Indexed {len(active)} active products from {last_page} pages ({total_api} total) in {elapsed}s")
+        print(f"[INVENTORY] Indexed {len(active)} active products from {last_page} pages ({total_api} total, {errors} errors) in {elapsed}s")
         return active
 
     async def get_low_stock_products(self, threshold: int = 25) -> list:
