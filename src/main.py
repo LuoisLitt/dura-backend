@@ -3,11 +3,13 @@ Dura Fulfilment Dashboard Backend
 API server die Goedgepickt data beschikbaar maakt voor het dashboard.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
+import hmac
 import os
 
 CET = ZoneInfo("Europe/Amsterdam")
@@ -140,8 +142,32 @@ app.add_middleware(
     allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept"],
+    allow_headers=["Content-Type", "Accept", "X-API-Key"],
 )
+
+# ============ API KEY AUTHENTICATION ============
+
+DURA_API_KEY = os.getenv("DURA_API_KEY", "")
+
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    """Middleware die X-API-Key header checkt op alle /api/* endpoints."""
+    path = request.url.path
+
+    # Skip auth voor health checks en CORS preflight
+    if not path.startswith("/api/") or request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Als geen API key geconfigureerd is, weiger alle /api/* requests
+    if not DURA_API_KEY:
+        print("[WARN] DURA_API_KEY not set - rejecting API request")
+        return JSONResponse(status_code=500, content={"success": False, "error": "Server configuration error"})
+
+    api_key = request.headers.get("X-API-Key", "")
+    if not api_key or not hmac.compare_digest(api_key, DURA_API_KEY):
+        return JSONResponse(status_code=401, content={"success": False, "error": "Unauthorized"})
+
+    return await call_next(request)
 
 
 # ============ COMBINED PAGE DATA ============
