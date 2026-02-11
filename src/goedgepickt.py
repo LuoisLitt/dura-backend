@@ -206,8 +206,7 @@ class GoedgepicktAPI:
             print(f"[INVENTORY] Indexed {len(active)} active products from 1 page in {elapsed}s")
             return active
 
-        # Verwerk in batches van 10 pagina's, met 1s pauze ertussen
-        BATCH_SIZE = 10
+        # Sequentieel ophalen met korte pauze — Goedgepickt rate limit is streng
         MAX_RETRIES = 3
 
         async def fetch_page_with_retry(page_num: int) -> list:
@@ -218,8 +217,8 @@ class GoedgepicktAPI:
                     return _extract_active(items)
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
-                        wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s...")
+                        wait = 3 * (attempt + 1)  # 3s, 6s, 9s
+                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s (attempt {attempt+1})")
                         await asyncio.sleep(wait)
                         continue
                     print(f"[INVENTORY] Page {page_num} HTTP {e.response.status_code}")
@@ -233,17 +232,16 @@ class GoedgepicktAPI:
             errors += 1
             return []
 
-        pages_remaining = list(range(2, last_page + 1))
-        for batch_start in range(0, len(pages_remaining), BATCH_SIZE):
-            batch = pages_remaining[batch_start:batch_start + BATCH_SIZE]
-            tasks = [fetch_page_with_retry(p) for p in batch]
-            results = await asyncio.gather(*tasks)
-            for page_results in results:
-                active.extend(page_results)
+        # Sequentieel: 1 request per keer, 0.3s pauze (~200 req/min)
+        for page_num in range(2, last_page + 1):
+            result = await fetch_page_with_retry(page_num)
+            active.extend(result)
+            await asyncio.sleep(0.3)
 
-            # Pauze tussen batches om rate limit te vermijden
-            if batch_start + BATCH_SIZE < len(pages_remaining):
-                await asyncio.sleep(1.0)
+            # Progress log elke 200 pagina's
+            if page_num % 200 == 0:
+                elapsed_so_far = round(_time.monotonic() - start, 1)
+                print(f"[INVENTORY] Progress: page {page_num}/{last_page}, {len(active)} active so far ({elapsed_so_far}s)")
 
         # Sorteer op stock (laagste eerst)
         active.sort(key=lambda p: p["stock"])
