@@ -539,6 +539,19 @@ class GoedgepicktAPI:
         else:
             processed_exact, processed_by_status = 0, {}
         
+        # Override counts met werkelijk opgehaald aantal (API totalItems is vaak vertraagd/gecacht)
+        if today_orders_sample and len(today_orders_sample) > 0:
+            actual_count = len(today_orders_sample)
+            if actual_count > (orders_today_count or 0):
+                print(f"[Dashboard] Orders today: API reported {orders_today_count}, actual fetched {actual_count}", flush=True)
+                orders_today_count = actual_count
+
+        if today_shipments and len(today_shipments) > 0:
+            actual_ship = len(today_shipments)
+            if actual_ship > (shipments_today_count or 0):
+                print(f"[Dashboard] Shipments today: API reported {shipments_today_count}, actual fetched {actual_ship}", flush=True)
+                shipments_today_count = actual_ship
+
         # ========== FASE 2: Bereken stats uit opgehaalde data (CPU only, geen API) ==========
         orders_by_status = {}
         revenue_today = 0.0
