@@ -190,7 +190,7 @@ async def warm_cache():
             print("[WarmCache] Fetching dashboard stats...", flush=True)
             stats = await client.get_dashboard_stats()
             cache.set("dashboard", stats, CACHE_TTL_DASHBOARD + 60)
-            print(f"[WarmCache] Dashboard cached: {stats.get('orders', {}).get('today', '?')} orders today", flush=True)
+            print(f"[WarmCache] Dashboard cached: {stats.get('orders', {}).get('today', '?')} orders, {stats.get('shipments', {}).get('today', '?')} shipments, {stats.get('orders', {}).get('processed', '?')} verwerkt", flush=True)
 
             # Wacht 5s om rate limit budget te laten herstellen
             await asyncio.sleep(5)

@@ -588,11 +588,7 @@ class GoedgepicktAPI:
                 print(f"[Dashboard] Shipments today: API reported {shipments_today_count}, actual fetched {actual_ship}", flush=True)
                 shipments_today_count = actual_ship
 
-        # GoedGepickt /orders API capt soms op ~500 items, terwijl /shipments alles retourneert.
-        # Elke verzending was een order, dus als shipments > orders, gebruik shipments als minimum.
-        if (shipments_today_count or 0) > (orders_today_count or 0):
-            print(f"[Dashboard] Orders count corrected: {orders_today_count} -> {shipments_today_count} (using shipments count, orders API caps at ~500)", flush=True)
-            orders_today_count = shipments_today_count
+        print(f"[Dashboard] Orders binnengekomen: {orders_today_count}, Verzendingen (verwerkt): {shipments_today_count}", flush=True)
 
         # ========== FASE 2: Bereken stats uit opgehaalde data (CPU only, geen API) ==========
         orders_by_status = {}
@@ -647,12 +643,12 @@ class GoedgepicktAPI:
         top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         top_webshops_list = [{"name": name, "count": count} for name, count in top_webshops]
         
-        # Gebruik exacte API count voor processed orders (niet sample-based)
-        if processed_exact > 0:
-            processed_orders = processed_exact
-            for s, c in processed_by_status.items():
-                orders_by_status[s] = c
-        else:
+        # Verwerkte orders = shipments count (elke verzending = een verwerkt pakket).
+        # De orders API status queries (shipped/completed/delivered) geven onbetrouwbare totalItems.
+        # Shipments count is het meest betrouwbaar want het is het werkelijke aantal verpakte pakketten.
+        processed_orders = shipments_today_count or 0
+        if processed_orders == 0:
+            # Fallback: tel uit orders sample
             processed_statuses = {"shipped", "completed", "delivered"}
             processed_orders = sum(count for s, count in orders_by_status.items() if s in processed_statuses)
 
