@@ -176,6 +176,7 @@ CACHE_TTL_ORDERS = 90       # 90 seconden (was 30, verhoogd voor snelheid)
 CACHE_TTL_INVENTORY = 300   # 5 minuten (voorraad verandert niet elke 2 min)
 CACHE_TTL_SHIPMENTS = 90    # 90 seconden (Goedgepickt shipments API is traag)
 CACHE_TTL_SLA = 300         # 5 minuten (SLA metrics veranderen niet snel)
+CACHE_TTL_ACTIVE_INV = 2100 # 35 minuten (indexer draait elke 30 min)
 
 # ============ CACHE PRE-WARMING ============
 
@@ -217,6 +218,22 @@ async def warm_cache():
         await asyncio.sleep(45)
 
 
+# ============ INVENTORY INDEXER ============
+
+async def index_active_inventory():
+    """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
+    while True:
+        try:
+            client = get_client()
+            active = await client.get_in_stock_products()
+            cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
+            print(f"[INVENTORY] Cache updated: {len(active)} active products")
+        except Exception as e:
+            print(f"[INVENTORY] Index error: {e}")
+
+        await asyncio.sleep(1800)  # 30 minuten
+
+
 # ============ LIFESPAN (startup + shutdown) ============
 
 @asynccontextmanager
@@ -225,6 +242,9 @@ async def lifespan(app: FastAPI):
     # --- STARTUP ---
     warm_task = asyncio.create_task(warm_cache())
     print("[Startup] Cache pre-warming task gestart")
+
+    inventory_task = asyncio.create_task(index_active_inventory())
+    print("[Startup] Inventory indexer gestart")
 
     try:
         setup_scheduler(app)
@@ -236,13 +256,18 @@ async def lifespan(app: FastAPI):
     # --- SHUTDOWN ---
     print("[Shutdown] Graceful shutdown gestart...")
 
-    # Cancel cache pre-warming task
+    # Cancel background tasks
     warm_task.cancel()
+    inventory_task.cancel()
     try:
         await warm_task
     except asyncio.CancelledError:
         pass
-    print("[Shutdown] Cache pre-warming gestopt")
+    try:
+        await inventory_task
+    except asyncio.CancelledError:
+        pass
+    print("[Shutdown] Background tasks gestopt")
 
     # Close httpx client (GoedgepicktAPI)
     try:
@@ -1056,26 +1081,76 @@ async def get_order(order_uuid: str):
 # ============ VOORRAAD ============
 
 @app.get("/api/inventory")
-async def get_inventory(low_stock_only: bool = False, page: int = 1):
-    """Haal voorraad/producten op. Gecached voor 120s."""
+async def get_inventory(
+    low_stock_only: bool = False,
+    active_only: bool = True,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 50,
+):
+    """Haal voorraad/producten op. active_only=true serveert vanuit de gecachete index."""
     try:
-        cache_key = f"inventory:{low_stock_only}:{page}"
-        
-        async def fetch():
-            client = get_client()
-            if low_stock_only:
+        if low_stock_only:
+            cache_key = f"inventory:low_stock:{page}"
+            async def fetch():
+                client = get_client()
                 products = await client.get_low_stock_products()
                 return {"items": products, "total": len(products), "lastPage": 1}
-            else:
-                items, page_info = await client.get_products(limit=50, page=page)
-                return {
-                    "items": items,
-                    "total": page_info.get("totalItems", len(items)),
-                    "lastPage": page_info.get("lastPage", 1)
-                }
-        
+            result = await cache.get_or_fetch(cache_key, CACHE_TTL_INVENTORY, fetch)
+            return {
+                "success": True,
+                "count": len(result["items"]),
+                "total": result["total"],
+                "page": 1,
+                "lastPage": result["lastPage"],
+                "data": result["items"]
+            }
+
+        if active_only:
+            # Serveer vanuit gecachete active products index
+            active = cache.get("inventory_active")
+            if active is None:
+                # Index nog niet klaar, doe een eenmalige fetch
+                client = get_client()
+                active = await client.get_in_stock_products()
+                cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
+
+            # Backend zoeken op SKU + naam
+            filtered = active
+            if search:
+                q = search.lower()
+                filtered = [p for p in active if q in p.get("sku", "").lower() or q in p.get("name", "").lower()]
+
+            # Backend paginering
+            total = len(filtered)
+            per_page = max(1, min(per_page, 200))
+            last_page = max(1, (total + per_page - 1) // per_page)
+            page = max(1, min(page, last_page))
+            start = (page - 1) * per_page
+            end = start + per_page
+            page_items = filtered[start:end]
+
+            return {
+                "success": True,
+                "count": len(page_items),
+                "total": total,
+                "page": page,
+                "lastPage": last_page,
+                "data": page_items,
+                "active_only": True,
+            }
+
+        # Fallback: pass-through naar Goedgepickt (active_only=false)
+        cache_key = f"inventory:passthrough:{page}"
+        async def fetch():
+            client = get_client()
+            items, page_info = await client.get_products(limit=50, page=page)
+            return {
+                "items": items,
+                "total": page_info.get("totalItems", len(items)),
+                "lastPage": page_info.get("lastPage", 1)
+            }
         result = await cache.get_or_fetch(cache_key, CACHE_TTL_INVENTORY, fetch)
-        
         return {
             "success": True,
             "count": len(result["items"]),
