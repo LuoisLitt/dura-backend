@@ -6,11 +6,17 @@ API server die Goedgepickt data beschikbaar maakt voor het dashboard.
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 import hmac
+import hashlib
+import json
+import base64
 import os
+
+import bcrypt
 
 CET = ZoneInfo("Europe/Amsterdam")
 import time
@@ -22,6 +28,54 @@ from ai_updates import get_cached_insights, generate_insights, setup_scheduler
 
 # Load environment variables
 load_dotenv()
+
+# ============ AUTHENTICATION ============
+
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+
+USERS = {
+    "michel@durafulfilment.nl": {
+        "name": "Michel",
+        "password_hash": "$2b$12$43/gz0tOBkjLKOxFBlMwq.c99buavYr280mUY4HrDtUAis/Wb.J.K",
+    },
+    "jarne@durafulfilment.nl": {
+        "name": "Jarne",
+        "password_hash": "$2b$12$aJAd.m6yYyiPO50J31dUke0h1g6bCTHpJNOyWgjXH5qCdLPPRXUEW",
+    },
+    "demo@durafulfilment.nl": {
+        "name": "Demo",
+        "password_hash": "$2b$12$qBDjptPGTOxctYMNF9Nz5urDMsSG0ySMTMDsiGcLFbCE6S8nsRi82",
+    },
+}
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+def create_session_token(email: str, name: str) -> str:
+    """Maak een signed session token (HMAC-SHA256, 24 uur geldig)."""
+    payload = {"email": email, "name": name, "exp": int(time.time()) + 86400}
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    sig = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def verify_session_token(token: str) -> Optional[dict]:
+    """Verifieer en decode een session token. Returns payload dict of None."""
+    try:
+        payload_b64, sig = token.rsplit(".", 1)
+        expected = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        if payload.get("exp", 0) < time.time():
+            return None
+        return payload
+    except Exception:
+        return None
+
 
 # ============ IN-MEMORY CACHE ============
 
@@ -141,8 +195,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "X-API-Key"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-API-Key", "Authorization"],
 )
 
 # ============ API KEY AUTHENTICATION ============
@@ -154,8 +208,8 @@ async def verify_api_key(request: Request, call_next):
     """Middleware die X-API-Key header checkt op alle /api/* endpoints."""
     path = request.url.path
 
-    # Skip auth voor health checks en CORS preflight
-    if not path.startswith("/api/") or request.method == "OPTIONS":
+    # Skip auth voor health checks, CORS preflight en auth endpoints
+    if not path.startswith("/api/") or request.method == "OPTIONS" or path.startswith("/api/auth/"):
         return await call_next(request)
 
     # Als geen API key geconfigureerd is, weiger alle /api/* requests
@@ -168,6 +222,42 @@ async def verify_api_key(request: Request, call_next):
         return JSONResponse(status_code=401, content={"success": False, "error": "Unauthorized"})
 
     return await call_next(request)
+
+
+# ============ SESSION AUTH ENDPOINTS ============
+
+@app.post("/api/auth/login")
+async def auth_login(body: LoginRequest):
+    """Login met email + wachtwoord. Geeft signed session token terug."""
+    if not SESSION_SECRET:
+        print("[WARN] SESSION_SECRET not set - rejecting login")
+        return JSONResponse(status_code=500, content={"success": False, "error": "Server configuration error"})
+
+    email = body.email.strip().lower()
+    user = USERS.get(email)
+    if not user:
+        return JSONResponse(status_code=401, content={"success": False, "error": "Ongeldige inloggegevens"})
+
+    if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+        return JSONResponse(status_code=401, content={"success": False, "error": "Ongeldige inloggegevens"})
+
+    token = create_session_token(email, user["name"])
+    return {"success": True, "token": token, "user": {"email": email, "name": user["name"]}}
+
+
+@app.get("/api/auth/verify")
+async def auth_verify(request: Request):
+    """Verifieer of een session token geldig is."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"success": False, "error": "Geen token"})
+
+    token = auth_header[7:]
+    payload = verify_session_token(token)
+    if not payload:
+        return JSONResponse(status_code=401, content={"success": False, "error": "Token ongeldig of verlopen"})
+
+    return {"success": True, "user": {"email": payload["email"], "name": payload["name"]}}
 
 
 # ============ COMBINED PAGE DATA ============
