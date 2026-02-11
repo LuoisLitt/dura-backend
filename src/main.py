@@ -1204,14 +1204,24 @@ async def get_inventory(
 
 @app.get("/api/inventory/alerts")
 async def get_inventory_alerts():
-    """Haal producten met lage voorraad op. Gecached voor 120s."""
+    """Haal producten met lage voorraad op. Gebruikt active index als beschikbaar."""
     try:
+        # Als de active inventory index beschikbaar is, leid alerts daaruit af (geen extra API calls)
+        active = cache.get("inventory_active")
+        if active:
+            alerts = [p for p in active if p.get("stock", 0) <= 25]
+            alerts.sort(key=lambda p: p.get("stock", 0))
+            return {"success": True, "count": len(alerts), "data": alerts}
+
+        # Tijdens indexering: skip API call om rate limit budget te sparen
+        if _inventory_status.get("state") == "scanning":
+            return {"success": True, "count": 0, "data": [], "indexing": True}
+
         cache_key = "inventory_alerts"
-        
         async def fetch():
             client = get_client()
             return await client.get_low_stock_products(threshold=25)
-        
+
         alerts = await cache.get_or_fetch(cache_key, CACHE_TTL_INVENTORY, fetch)
         return {
             "success": True,
