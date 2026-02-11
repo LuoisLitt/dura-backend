@@ -397,47 +397,62 @@ class GoedgepicktAPI:
         return None
 
     async def _fetch_today_orders_all_pages(self, created_after: str, max_pages: int = 100) -> list:
-        """Haal alle orders op met batched parallel requests + retry bij 429."""
+        """Haal alle orders op. Stopt pas als een pagina leeg terugkomt (API metadata is onbetrouwbaar)."""
         items_first, pg_info = await self.get_orders(created_after=created_after, limit=50, page=1)
         if not items_first:
             return []
-        last_page = min(pg_info.get("lastPage", 1), max_pages)
         all_orders = list(items_first)
 
-        if last_page > 1:
-            BATCH_SIZE = 3
-            pages = list(range(2, last_page + 1))
-            for batch_start in range(0, len(pages), BATCH_SIZE):
-                batch = pages[batch_start:batch_start + BATCH_SIZE]
-                tasks = [
-                    self._fetch_page_with_retry(
-                        lambda p=p: self.get_orders(created_after=created_after, limit=50, page=p),
-                        label=f"orders p{p}"
-                    ) for p in batch
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, tuple) and len(r) == 2:
-                        all_orders.extend(r[0])
-                await asyncio.sleep(0.5)
-            print(f"[Dashboard] Fetched {len(all_orders)} orders from {last_page} pages")
+        # Gebruik lastPage als hint, maar ga DOOR als pagina's nog data bevatten
+        api_last_page = pg_info.get("lastPage", 1)
+        current_page = 2
+        BATCH_SIZE = 3
+        empty_count = 0
+
+        while current_page <= max_pages and empty_count == 0:
+            batch = list(range(current_page, min(current_page + BATCH_SIZE, max_pages + 1)))
+            if not batch:
+                break
+            tasks = [
+                self._fetch_page_with_retry(
+                    lambda p=p: self.get_orders(created_after=created_after, limit=50, page=p),
+                    label=f"orders p{p}"
+                ) for p in batch
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            batch_items = 0
+            for r in results:
+                if isinstance(r, tuple) and len(r) == 2 and r[0]:
+                    all_orders.extend(r[0])
+                    batch_items += len(r[0])
+                else:
+                    empty_count += 1
+            current_page += BATCH_SIZE
+            if batch_items == 0:
+                break
+            await asyncio.sleep(0.5)
+
+        actual_pages = (current_page - 2) // BATCH_SIZE + 1
+        if len(all_orders) > 50:
+            print(f"[Dashboard] Fetched {len(all_orders)} orders from {actual_pages} batches (API said lastPage={api_last_page})", flush=True)
         return all_orders
 
     async def _fetch_all_shipments(self, created_after: str, max_pages: int = 100) -> list:
-        """Haal alle shipments op met batched parallel requests + retry bij 429."""
+        """Haal alle shipments op. Stopt pas als een pagina leeg terugkomt (API metadata is onbetrouwbaar)."""
         items_first, pg_info = await self.get_shipments(created_after=created_after, limit=50, page=1)
         if not items_first:
             return []
-        last_page = min(pg_info.get("lastPage", 1), max_pages)
         all_shipments = list(items_first)
 
-        if last_page <= 1:
-            return all_shipments
-
+        api_last_page = pg_info.get("lastPage", 1)
+        current_page = 2
         BATCH_SIZE = 3
-        pages = list(range(2, last_page + 1))
-        for batch_start in range(0, len(pages), BATCH_SIZE):
-            batch = pages[batch_start:batch_start + BATCH_SIZE]
+        empty_count = 0
+
+        while current_page <= max_pages and empty_count == 0:
+            batch = list(range(current_page, min(current_page + BATCH_SIZE, max_pages + 1)))
+            if not batch:
+                break
             tasks = [
                 self._fetch_page_with_retry(
                     lambda p=p: self.get_shipments(created_after=created_after, limit=50, page=p),
@@ -445,12 +460,20 @@ class GoedgepicktAPI:
                 ) for p in batch
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            batch_items = 0
             for r in results:
-                if isinstance(r, tuple) and len(r) == 2:
+                if isinstance(r, tuple) and len(r) == 2 and r[0]:
                     all_shipments.extend(r[0])
+                    batch_items += len(r[0])
+                else:
+                    empty_count += 1
+            current_page += BATCH_SIZE
+            if batch_items == 0:
+                break
             await asyncio.sleep(0.5)
 
-        print(f"[Dashboard] Fetched {len(all_shipments)} shipments from {last_page} pages")
+        if len(all_shipments) > 50:
+            print(f"[Dashboard] Fetched {len(all_shipments)} shipments (API said lastPage={api_last_page})", flush=True)
         return all_shipments
 
     async def get_dashboard_stats(self) -> dict:
