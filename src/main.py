@@ -1110,10 +1110,19 @@ async def get_inventory(
             # Serveer vanuit gecachete active products index
             active = cache.get("inventory_active")
             if active is None:
-                # Index nog niet klaar, doe een eenmalige fetch
+                # Index nog niet klaar — val terug op pass-through (1 pagina)
+                print("[INVENTORY] Cache not ready, falling back to pass-through")
                 client = get_client()
-                active = await client.get_in_stock_products()
-                cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
+                items, page_info = await client.get_products(limit=50, page=page)
+                return {
+                    "success": True,
+                    "count": len(items),
+                    "total": page_info.get("totalItems", len(items)),
+                    "page": page,
+                    "lastPage": page_info.get("lastPage", 1),
+                    "data": items,
+                    "indexing": True,
+                }
 
             # Backend zoeken op SKU + naam
             filtered = active
