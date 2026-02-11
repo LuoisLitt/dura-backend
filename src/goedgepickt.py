@@ -89,12 +89,12 @@ class GoedgepicktAPI:
             "perPage": min(limit, 50),  # Max 50 per pagina
             "page": page
         }
-        
+
         if created_after:
             params["createdAfter"] = created_after
         if status:
             params["status"] = status
-        
+
         result = await self._request("GET", "/orders", params=params)
         items = result.get("items", [])
         page_info = result.get("pageInfo", {})
@@ -403,8 +403,23 @@ class GoedgepicktAPI:
             return []
         all_orders = list(items_first)
 
-        # Gebruik lastPage als hint, maar ga DOOR als pagina's nog data bevatten
         api_last_page = pg_info.get("lastPage", 1)
+        api_total = pg_info.get("totalItems", 0)
+        print(f"[Orders] Page 1: {len(items_first)} items, API says totalItems={api_total} lastPage={api_last_page}", flush=True)
+
+        # Test: ook proberen MET webshopUuid om verschil te zien
+        try:
+            _, pg_info_ws = await self.get_orders(created_after=created_after, limit=1, page=1)
+            # Nu met webshopUuid
+            params_ws = {"webshopUuid": self.webshop_id, "perPage": 1, "page": 1, "createdAfter": created_after}
+            result_ws = await self._request("GET", "/orders", params=params_ws)
+            ws_total = result_ws.get("pageInfo", {}).get("totalItems", 0)
+            ws_last = result_ws.get("pageInfo", {}).get("lastPage", 0)
+            print(f"[Orders] WITH webshopUuid: totalItems={ws_total} lastPage={ws_last}", flush=True)
+            print(f"[Orders] WITHOUT webshopUuid: totalItems={api_total} lastPage={api_last_page}", flush=True)
+        except Exception as e:
+            print(f"[Orders] webshopUuid test failed: {e}", flush=True)
+
         current_page = 2
         BATCH_SIZE = 3
         empty_count = 0
@@ -432,9 +447,7 @@ class GoedgepicktAPI:
                 break
             await asyncio.sleep(0.5)
 
-        actual_pages = (current_page - 2) // BATCH_SIZE + 1
-        if len(all_orders) > 50:
-            print(f"[Dashboard] Fetched {len(all_orders)} orders from {actual_pages} batches (API said lastPage={api_last_page})", flush=True)
+        print(f"[Orders] TOTAL: Fetched {len(all_orders)} orders, stopped at page {current_page-1} (API said lastPage={api_last_page}, totalItems={api_total})", flush=True)
         return all_orders
 
     async def _fetch_all_shipments(self, created_after: str, max_pages: int = 100) -> list:
