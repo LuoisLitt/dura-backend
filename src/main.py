@@ -28,7 +28,7 @@ import asyncio
 from dotenv import load_dotenv
 
 from goedgepickt import get_client, GoedgepicktAPI
-from ai_updates import get_cached_insights, generate_insights, setup_scheduler
+from ai_updates import get_cached_insights, generate_insights, setup_scheduler, set_inventory_cache_getter
 
 # Load environment variables
 load_dotenv()
@@ -276,6 +276,10 @@ async def lifespan(app: FastAPI):
 
     inventory_task = asyncio.create_task(index_active_inventory())
     print("[Startup] Inventory indexer task aangemaakt", flush=True)
+
+    # Registreer inventory cache getter voor AI insights
+    set_inventory_cache_getter(lambda: cache.get("inventory_active"))
+    print("[Startup] Inventory cache getter geregistreerd bij AI insights", flush=True)
     sys.stdout.flush()
 
     try:

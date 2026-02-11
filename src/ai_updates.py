@@ -25,9 +25,22 @@ _ai_cache = {
     "error": None
 }
 
+# Referentie naar inventory cache getter (wordt gezet vanuit main.py)
+_get_inventory_cache = None
+
+
+def set_inventory_cache_getter(getter_fn):
+    """Registreer een functie die de inventory cache ophaalt.
+
+    Wordt aangeroepen vanuit main.py zodat ai_updates.py toegang heeft
+    tot de volledige inventory cache zonder circular imports.
+    """
+    global _get_inventory_cache
+    _get_inventory_cache = getter_fn
+
 
 def _safe_stock(val) -> int:
-    """Convert stock value to int safely."""
+    """Convert stock value to int safely. Handles int, str, and dict format from Goedgepickt."""
     if isinstance(val, (int, float)):
         return int(val)
     if isinstance(val, str):
@@ -35,6 +48,11 @@ def _safe_stock(val) -> int:
             return int(val)
         except ValueError:
             return 0
+    if isinstance(val, dict):
+        free = val.get("freeStock", val.get("totalStock", 0))
+        if isinstance(free, (int, float)):
+            return int(free)
+        return 0
     return 0
 
 
@@ -64,8 +82,15 @@ async def _safe_fetch(coro, fallback=None):
         return fallback
 
 
-async def _gather_extended_data(client) -> dict:
-    """Verzamel uitgebreide data voor alle pagina's. Parallel waar mogelijk."""
+async def _gather_extended_data(client, inventory_cache: list = None) -> dict:
+    """Verzamel uitgebreide data voor alle pagina's. Parallel waar mogelijk.
+
+    Args:
+        client: GoedgepicktAPI client
+        inventory_cache: Optionele lijst van alle actieve producten (uit inventory indexer).
+                        Als meegegeven, wordt deze gebruikt voor low stock berekeningen
+                        i.p.v. de beperkte 20-pagina scan.
+    """
     from zoneinfo import ZoneInfo
     CET = ZoneInfo("Europe/Amsterdam")
     now = datetime.now(tz=CET)
@@ -108,6 +133,10 @@ async def _gather_extended_data(client) -> dict:
         return items
 
     async def fetch_low_stock():
+        # Als de inventory cache beschikbaar is, gebruik die (alle 13k+ producten)
+        # i.p.v. de beperkte 20-pagina scan
+        if inventory_cache:
+            return [p for p in inventory_cache if _safe_stock(p.get("stock", 0)) <= 25]
         return await client.get_low_stock_products(threshold=25)
 
     async def fetch_picks_today():
@@ -381,6 +410,18 @@ async def generate_insights():
     """Genereer AI insights op basis van actuele Goedgepickt data."""
     print(f"[AI Insights] Generating insights at {datetime.now().isoformat()}")
 
+    # Haal inventory cache op als die beschikbaar is
+    inventory_cache = None
+    if _get_inventory_cache:
+        try:
+            inventory_cache = _get_inventory_cache()
+            if inventory_cache:
+                print(f"[AI Insights] Using inventory cache with {len(inventory_cache)} products")
+            else:
+                print("[AI Insights] Inventory cache not ready yet, falling back to limited scan")
+        except Exception as e:
+            print(f"[AI Insights] Could not get inventory cache: {e}")
+
     api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         error_msg = "CLAUDE_API_KEY niet geconfigureerd"
@@ -393,7 +434,7 @@ async def generate_insights():
 
         # Verzamel uitgebreide data (parallel)
         print("[AI Insights] Gathering extended data...")
-        data = await _gather_extended_data(client)
+        data = await _gather_extended_data(client, inventory_cache=inventory_cache)
         print(f"[AI Insights] Data gathered: {data['orders_today']} orders, {data['shipments_today']} shipments, {data['low_stock_count']} low stock, {data['picks_today_total']} picks")
 
         # Bouw data summary
