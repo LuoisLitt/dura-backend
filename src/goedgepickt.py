@@ -382,8 +382,22 @@ class GoedgepicktAPI:
             print(f"[SafeFetch] Failed ({type(e).__name__}): {e}")
             return fallback
 
+    async def _fetch_page_with_retry(self, fetch_fn, label: str = "page", max_retries: int = 3):
+        """Fetch een pagina met retry bij 429 rate limit."""
+        for attempt in range(max_retries):
+            try:
+                return await fetch_fn()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt < max_retries - 1:
+                    wait = 3 * (attempt + 1)
+                    print(f"[Dashboard] Rate limited on {label}, waiting {wait}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        return None
+
     async def _fetch_today_orders_all_pages(self, created_after: str, max_pages: int = 100) -> list:
-        """Haal alle orders op met batched parallel requests (5 tegelijk)."""
+        """Haal alle orders op met batched parallel requests + retry bij 429."""
         items_first, pg_info = await self.get_orders(created_after=created_after, limit=50, page=1)
         if not items_first:
             return []
@@ -391,20 +405,26 @@ class GoedgepicktAPI:
         all_orders = list(items_first)
 
         if last_page > 1:
-            BATCH_SIZE = 5
+            BATCH_SIZE = 3
             pages = list(range(2, last_page + 1))
             for batch_start in range(0, len(pages), BATCH_SIZE):
                 batch = pages[batch_start:batch_start + BATCH_SIZE]
-                tasks = [self.get_orders(created_after=created_after, limit=50, page=p) for p in batch]
+                tasks = [
+                    self._fetch_page_with_retry(
+                        lambda p=p: self.get_orders(created_after=created_after, limit=50, page=p),
+                        label=f"orders p{p}"
+                    ) for p in batch
+                ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in results:
                     if isinstance(r, tuple) and len(r) == 2:
                         all_orders.extend(r[0])
+                await asyncio.sleep(0.5)
             print(f"[Dashboard] Fetched {len(all_orders)} orders from {last_page} pages")
         return all_orders
 
     async def _fetch_all_shipments(self, created_after: str, max_pages: int = 100) -> list:
-        """Haal alle shipments op met batched parallel requests (5 tegelijk)."""
+        """Haal alle shipments op met batched parallel requests + retry bij 429."""
         items_first, pg_info = await self.get_shipments(created_after=created_after, limit=50, page=1)
         if not items_first:
             return []
@@ -414,15 +434,21 @@ class GoedgepicktAPI:
         if last_page <= 1:
             return all_shipments
 
-        BATCH_SIZE = 5
+        BATCH_SIZE = 3
         pages = list(range(2, last_page + 1))
         for batch_start in range(0, len(pages), BATCH_SIZE):
             batch = pages[batch_start:batch_start + BATCH_SIZE]
-            tasks = [self.get_shipments(created_after=created_after, limit=50, page=p) for p in batch]
+            tasks = [
+                self._fetch_page_with_retry(
+                    lambda p=p: self.get_shipments(created_after=created_after, limit=50, page=p),
+                    label=f"shipments p{p}"
+                ) for p in batch
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, tuple) and len(r) == 2:
                     all_shipments.extend(r[0])
+            await asyncio.sleep(0.5)
 
         print(f"[Dashboard] Fetched {len(all_shipments)} shipments from {last_page} pages")
         return all_shipments
@@ -612,21 +638,29 @@ class GoedgepicktAPI:
                 
                 last_page = pg_info.get("lastPage", 1)
                 if last_page > 1:
-                    # Fetch remaining pages IN PARALLEL (max 50 pages)
-                    max_pages = min(last_page, 50)
-                    tasks = [self.get_orders(created_after=week_start, limit=50, page=p)
-                             for p in range(2, max_pages + 1)]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for r in results:
-                        if isinstance(r, Exception):
-                            print(f"[Dashboard] Week revenue page error: {r}")
-                            continue
-                        items, _ = r
-                        for o in items:
-                            try:
-                                total += float(o.get("totalPaid", "0") or "0")
-                            except (ValueError, TypeError):
-                                pass
+                    # Batched fetch: 3 pages tegelijk met retry
+                    max_pg = min(last_page, 50)
+                    pages = list(range(2, max_pg + 1))
+                    BATCH = 3
+                    for b_start in range(0, len(pages), BATCH):
+                        batch = pages[b_start:b_start + BATCH]
+                        tasks = [
+                            self._fetch_page_with_retry(
+                                lambda p=p: self.get_orders(created_after=week_start, limit=50, page=p),
+                                label=f"revenue p{p}"
+                            ) for p in batch
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for r in results:
+                            if isinstance(r, Exception) or r is None:
+                                continue
+                            items, _ = r
+                            for o in items:
+                                try:
+                                    total += float(o.get("totalPaid", "0") or "0")
+                                except (ValueError, TypeError):
+                                    pass
+                        await asyncio.sleep(0.5)
                 
                 print(f"[Dashboard] Week revenue: €{total:.2f} from {last_page} pages (parallel)")
                 return round(total, 2)
