@@ -133,13 +133,14 @@ async def startup_event():
         print(f"AI Scheduler setup failed (non-fatal): {e}")
 
 # CORS configuratie
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+_default_origins = "https://klain.nl,https://www.klain.nl"
+cors_origins = os.getenv("CORS_ORIGINS", _default_origins).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept"],
 )
 
 
@@ -269,7 +270,8 @@ async def get_page_data(page: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_page_data({page}): {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ AI INSIGHTS ============
@@ -285,19 +287,6 @@ async def refresh_ai_insights():
     """Forceer een nieuwe AI insights generatie."""
     await generate_insights()
     return {"success": True, "data": get_cached_insights()}
-
-
-@app.get("/api/ai-insights/debug")
-async def debug_ai_insights():
-    """Debug endpoint om env vars te checken."""
-    claude_key = os.getenv("CLAUDE_API_KEY")
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    return {
-        "claude_key_set": bool(claude_key),
-        "claude_key_prefix": claude_key[:15] + "..." if claude_key else None,
-        "anthropic_key_set": bool(anthropic_key),
-        "anthropic_key_prefix": anthropic_key[:15] + "..." if anthropic_key else None,
-    }
 
 
 # ============ HEALTH CHECK ============
@@ -337,7 +326,8 @@ async def get_webshops():
         webshops = await client.get_webshops()
         return {"success": True, "count": len(webshops), "data": webshops}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_webshops: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ DASHBOARD ============
@@ -362,9 +352,10 @@ async def get_dashboard():
         stale = cache.get("dashboard")
         if stale:
             return {"success": True, "data": stale, "cached": True, "stale": True, "timestamp": datetime.now(tz=CET).isoformat()}
-        raise HTTPException(status_code=504, detail="Dashboard timeout - Goedgepickt API te traag")
+        raise HTTPException(status_code=504, detail="Dashboard timeout")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_dashboard: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ ORDERS ============
@@ -406,7 +397,8 @@ async def get_orders(
             "data": items
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_orders: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/orders/latest")
@@ -426,7 +418,8 @@ async def get_latest_orders(limit: int = 50):
             "data": orders
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_latest_orders: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/orders/{order_uuid}")
@@ -437,7 +430,8 @@ async def get_order(order_uuid: str):
         order = await client.get_order(order_uuid)
         return {"success": True, "data": order}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_order: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ VOORRAAD ============
@@ -472,7 +466,8 @@ async def get_inventory(low_stock_only: bool = False, page: int = 1):
             "data": result["items"]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_inventory: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/inventory/alerts")
@@ -492,7 +487,8 @@ async def get_inventory_alerts():
             "data": alerts
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_inventory_alerts: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ VERZENDINGEN ============
@@ -529,7 +525,8 @@ async def get_shipments(
             "data": items
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_shipments: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/shipments/latest")
@@ -549,7 +546,8 @@ async def get_latest_shipments(limit: int = 50):
             "data": shipments
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_latest_shipments: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ PICKS / MEDEWERKERS ============
@@ -566,7 +564,8 @@ async def get_users():
         users = await cache.get_or_fetch(cache_key, 120, fetch)
         return {"success": True, "count": len(users), "data": users}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_users: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/picks")
@@ -583,7 +582,8 @@ async def get_picks(date_from: Optional[str] = None, date_to: Optional[str] = No
         picks = await cache.get_or_fetch(cache_key, 60, fetch)
         return {"success": True, "count": len(picks), "data": picks}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_picks: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/picks/stats")
@@ -623,7 +623,8 @@ async def get_pick_stats():
         result = await cache.get_or_fetch(cache_key, 60, fetch)
         return {"success": True, "data": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] get_pick_stats: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ RUN SERVER ============
