@@ -220,20 +220,43 @@ async def warm_cache():
 
 # ============ INVENTORY INDEXER ============
 
+_inventory_status = {"state": "init", "products": 0, "last_run": None, "error": None}
+
 async def index_active_inventory():
     """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
-    # Wacht 120s bij startup zodat warm_cache klaar is en rate limit afkoelt
-    print("[INVENTORY] Waiting 120s before first index run...", flush=True)
-    await asyncio.sleep(120)
+    import sys
+    global _inventory_status
+    print("[INVENTORY] Task started, waiting 10s before first run...", flush=True)
+    sys.stdout.flush()
+    _inventory_status["state"] = "waiting"
+    await asyncio.sleep(10)
 
     while True:
         try:
+            _inventory_status["state"] = "scanning"
+            print("[INVENTORY] Starting scan...", flush=True)
+            sys.stdout.flush()
             client = get_client()
             active = await client.get_in_stock_products()
             cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
+            _inventory_status.update({
+                "state": "ready",
+                "products": len(active),
+                "last_run": datetime.now(tz=CET).isoformat(),
+                "error": None,
+            })
             print(f"[INVENTORY] Cache updated: {len(active)} active products", flush=True)
+            sys.stdout.flush()
         except Exception as e:
+            _inventory_status.update({
+                "state": "error",
+                "error": str(e),
+                "last_run": datetime.now(tz=CET).isoformat(),
+            })
+            import traceback
             print(f"[INVENTORY] Index error: {e}", flush=True)
+            traceback.print_exc()
+            sys.stdout.flush()
 
         await asyncio.sleep(1800)  # 30 minuten
 
@@ -244,11 +267,16 @@ async def index_active_inventory():
 async def lifespan(app: FastAPI):
     """Lifespan context manager: startup en shutdown logica."""
     # --- STARTUP ---
+    import sys
+    print("[Startup] === DURA BACKEND STARTING ===", flush=True)
+    sys.stdout.flush()
+
     warm_task = asyncio.create_task(warm_cache())
-    print("[Startup] Cache pre-warming task gestart")
+    print("[Startup] Cache pre-warming task gestart", flush=True)
 
     inventory_task = asyncio.create_task(index_active_inventory())
-    print("[Startup] Inventory indexer gestart")
+    print("[Startup] Inventory indexer task aangemaakt", flush=True)
+    sys.stdout.flush()
 
     try:
         setup_scheduler(app)
@@ -935,6 +963,20 @@ async def export_report(
     except Exception as e:
         print(f"[ERROR] export_report: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============ INVENTORY STATUS (debug) ============
+
+@app.get("/api/inventory/status")
+async def get_inventory_status():
+    """Debug endpoint: toont de status van de inventory indexer."""
+    cached = cache.get("inventory_active")
+    return {
+        "indexer": _inventory_status,
+        "cache_has_data": cached is not None,
+        "cache_count": len(cached) if cached else 0,
+        "timestamp": datetime.now(tz=CET).isoformat(),
+    }
 
 
 # ============ HEALTH CHECK ============

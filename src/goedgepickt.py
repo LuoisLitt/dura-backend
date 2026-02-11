@@ -176,16 +176,21 @@ class GoedgepicktAPI:
     async def get_in_stock_products(self, max_pages: int = 2500) -> list:
         """
         Haal ALLE producten met stock > 0 op door alle pagina's te scannen.
-        Verwerkt in kleine batches met pauze om 429 rate limits te voorkomen.
+        Batches van 5 concurrent requests met pauze om rate limits te voorkomen.
         Returns lijst met alleen noodzakelijke velden per product.
         """
+        import sys
         import time as _time
         start = _time.monotonic()
 
         # Eerste pagina ophalen om lastPage te bepalen
+        print("[INVENTORY] Fetching first page...", flush=True)
+        sys.stdout.flush()
         items_first, page_info = await self.get_products(limit=50, page=1)
         last_page = min(page_info.get("lastPage", 1), max_pages)
         total_api = page_info.get("totalItems", 0)
+        print(f"[INVENTORY] First page OK: {last_page} total pages, {total_api} products", flush=True)
+        sys.stdout.flush()
 
         active = []
         errors = 0
@@ -206,13 +211,16 @@ class GoedgepicktAPI:
 
         # Verwerk eerste pagina
         active.extend(_extract_active(items_first))
+        print(f"[INVENTORY] Page 1: {len(active)} active products found", flush=True)
+        sys.stdout.flush()
 
         if last_page <= 1:
             elapsed = round(_time.monotonic() - start, 1)
-            print(f"[INVENTORY] Indexed {len(active)} active products from 1 page in {elapsed}s", flush=True)
+            print(f"[INVENTORY] Done: {len(active)} active from 1 page in {elapsed}s", flush=True)
             return active
 
-        # Sequentieel ophalen met korte pauze — Goedgepickt rate limit is streng
+        # Batch ophalen: 5 concurrent requests per batch, 1s pauze tussen batches
+        BATCH_SIZE = 5
         MAX_RETRIES = 3
 
         async def fetch_page_with_retry(page_num: int) -> list:
@@ -223,38 +231,51 @@ class GoedgepicktAPI:
                     return _extract_active(items)
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
-                        wait = 3 * (attempt + 1)  # 3s, 6s, 9s
-                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s (attempt {attempt+1})", flush=True)
+                        wait = 5 * (attempt + 1)  # 5s, 10s, 15s
+                        if attempt == 0:
+                            print(f"[INVENTORY] Rate limited at page {page_num}, waiting {wait}s", flush=True)
                         await asyncio.sleep(wait)
                         continue
-                    print(f"[INVENTORY] Page {page_num} HTTP {e.response.status_code}", flush=True)
                     errors += 1
                     return []
                 except Exception as e:
-                    print(f"[INVENTORY] Page {page_num} error: {e}", flush=True)
+                    if attempt == MAX_RETRIES - 1:
+                        print(f"[INVENTORY] Page {page_num} failed: {e}", flush=True)
                     errors += 1
                     return []
-            print(f"[INVENTORY] Page {page_num} failed after {MAX_RETRIES} retries", flush=True)
             errors += 1
             return []
 
-        # Sequentieel: 1 request per keer, 0.5s pauze (~120 req/min)
-        # Laat headroom voor warm_cache en andere API calls
-        for page_num in range(2, last_page + 1):
-            result = await fetch_page_with_retry(page_num)
-            active.extend(result)
-            await asyncio.sleep(0.5)
+        # Batches van 5 pagina's tegelijk, 1s pauze tussen batches
+        pages = list(range(2, last_page + 1))
+        for batch_start in range(0, len(pages), BATCH_SIZE):
+            batch = pages[batch_start:batch_start + BATCH_SIZE]
+            results = await asyncio.gather(
+                *[fetch_page_with_retry(p) for p in batch],
+                return_exceptions=True
+            )
+            for r in results:
+                if isinstance(r, list):
+                    active.extend(r)
+                elif isinstance(r, Exception):
+                    errors += 1
 
-            # Progress log elke 200 pagina's
-            if page_num % 200 == 0:
+            # 1s pauze tussen batches
+            await asyncio.sleep(1.0)
+
+            # Progress log elke 100 pagina's
+            pages_done = batch_start + len(batch)
+            if pages_done % 100 < BATCH_SIZE:
                 elapsed_so_far = round(_time.monotonic() - start, 1)
-                print(f"[INVENTORY] Progress: page {page_num}/{last_page}, {len(active)} active so far ({elapsed_so_far}s)", flush=True)
+                print(f"[INVENTORY] Progress: {pages_done}/{len(pages)} pages, {len(active)} active, {errors} errors ({elapsed_so_far}s)", flush=True)
+                sys.stdout.flush()
 
         # Sorteer op stock (laagste eerst)
         active.sort(key=lambda p: p["stock"])
 
         elapsed = round(_time.monotonic() - start, 1)
-        print(f"[INVENTORY] Indexed {len(active)} active products from {last_page} pages ({total_api} total, {errors} errors) in {elapsed}s", flush=True)
+        print(f"[INVENTORY] DONE: {len(active)} active products from {last_page} pages ({total_api} total, {errors} errors) in {elapsed}s", flush=True)
+        sys.stdout.flush()
         return active
 
     async def get_low_stock_products(self, threshold: int = 25) -> list:
