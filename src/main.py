@@ -222,6 +222,10 @@ async def warm_cache():
 
 async def index_active_inventory():
     """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
+    # Wacht 120s bij startup zodat warm_cache klaar is en rate limit afkoelt
+    print("[INVENTORY] Waiting 120s before first index run...")
+    await asyncio.sleep(120)
+
     while True:
         try:
             client = get_client()

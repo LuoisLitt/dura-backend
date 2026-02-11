@@ -232,11 +232,12 @@ class GoedgepicktAPI:
             errors += 1
             return []
 
-        # Sequentieel: 1 request per keer, 0.3s pauze (~200 req/min)
+        # Sequentieel: 1 request per keer, 0.5s pauze (~120 req/min)
+        # Laat headroom voor warm_cache en andere API calls
         for page_num in range(2, last_page + 1):
             result = await fetch_page_with_retry(page_num)
             active.extend(result)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
             # Progress log elke 200 pagina's
             if page_num % 200 == 0:
