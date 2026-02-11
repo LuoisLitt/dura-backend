@@ -3,9 +3,11 @@ Dura Fulfilment Dashboard Backend
 API server die Goedgepickt data beschikbaar maakt voor het dashboard.
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -14,6 +16,8 @@ import hmac
 import hashlib
 import json
 import base64
+import csv
+import io
 import os
 
 import bcrypt
@@ -33,20 +37,28 @@ load_dotenv()
 
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 
-USERS = {
-    "michel@durafulfilment.nl": {
-        "name": "Michel",
-        "password_hash": "$2b$12$43/gz0tOBkjLKOxFBlMwq.c99buavYr280mUY4HrDtUAis/Wb.J.K",
-    },
-    "jarne@durafulfilment.nl": {
-        "name": "Jarne",
-        "password_hash": "$2b$12$aJAd.m6yYyiPO50J31dUke0h1g6bCTHpJNOyWgjXH5qCdLPPRXUEW",
-    },
-    "demo@durafulfilment.nl": {
-        "name": "Demo",
-        "password_hash": "$2b$12$qBDjptPGTOxctYMNF9Nz5urDMsSG0ySMTMDsiGcLFbCE6S8nsRi82",
-    },
-}
+def _load_users() -> dict:
+    """Laad users uit DURA_USERS env var (JSON) of gebruik fallback demo account."""
+    users_json = os.getenv("DURA_USERS", "")
+    if users_json:
+        try:
+            users = json.loads(users_json)
+            print(f"[AUTH] Loaded {len(users)} users from DURA_USERS env var")
+            return users
+        except json.JSONDecodeError as e:
+            print(f"[WARN] DURA_USERS invalid JSON: {e} — falling back to demo account")
+    else:
+        print("[WARN] DURA_USERS not set — only demo account available")
+    # Fallback: alleen demo account (geen echte credentials in broncode)
+    return {
+        "demo@durafulfilment.nl": {
+            "name": "Demo",
+            "password_hash": "$2b$12$qBDjptPGTOxctYMNF9Nz5urDMsSG0ySMTMDsiGcLFbCE6S8nsRi82",
+        },
+    }
+
+
+USERS = _load_users()
 
 
 class LoginRequest(BaseModel):
@@ -54,8 +66,42 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RateLimiter:
+    """In-memory rate limiter per key (bijv. IP-adres)."""
+
+    def __init__(self, max_attempts: int, window_seconds: int):
+        self.max_attempts = max_attempts
+        self.window = window_seconds
+        self._attempts: dict[str, list[float]] = {}
+
+    def is_limited(self, key: str) -> bool:
+        """Check of key over de limiet is. Ruimt ook verlopen keys op."""
+        now = time.time()
+        cutoff = now - self.window
+        # Cleanup: verwijder keys ouder dan 2x window
+        cleanup_cutoff = now - (self.window * 2)
+        stale_keys = [k for k, v in self._attempts.items() if v and max(v) < cleanup_cutoff]
+        for k in stale_keys:
+            del self._attempts[k]
+        # Check huidige key
+        attempts = [t for t in self._attempts.get(key, []) if t > cutoff]
+        self._attempts[key] = attempts
+        return len(attempts) >= self.max_attempts
+
+    def record(self, key: str):
+        """Registreer een poging."""
+        if key not in self._attempts:
+            self._attempts[key] = []
+        self._attempts[key].append(time.time())
+
+
+login_limiter = RateLimiter(max_attempts=5, window_seconds=900)  # 5 per 15 min
+
+
 def create_session_token(email: str, name: str) -> str:
     """Maak een signed session token (HMAC-SHA256, 24 uur geldig)."""
+    if not SESSION_SECRET:
+        raise ValueError("SESSION_SECRET not configured")
     payload = {"email": email, "name": name, "exp": int(time.time()) + 86400}
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(SESSION_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
@@ -129,17 +175,9 @@ CACHE_TTL_DASHBOARD = 180   # 3 minuten (warm_cache ververst elke 45s, TTL=180s 
 CACHE_TTL_ORDERS = 90       # 90 seconden (was 30, verhoogd voor snelheid)
 CACHE_TTL_INVENTORY = 300   # 5 minuten (voorraad verandert niet elke 2 min)
 CACHE_TTL_SHIPMENTS = 90    # 90 seconden (Goedgepickt shipments API is traag)
-
-# Initialize FastAPI
-app = FastAPI(
-    title="Dura Fulfilment Dashboard API",
-    description="Backend API voor het Dura Fulfilment management dashboard",
-    version="3.0.0"
-)
+CACHE_TTL_SLA = 300         # 5 minuten (SLA metrics veranderen niet snel)
 
 # ============ CACHE PRE-WARMING ============
-
-_warm_task = None
 
 async def warm_cache():
     """Achtergrond taak die cache elke 45s ververst zodat users altijd cached data krijgen."""
@@ -147,46 +185,82 @@ async def warm_cache():
         try:
             client = get_client()
             today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
-            
+
             # Dashboard stats
             stats = await client.get_dashboard_stats()
             cache.set("dashboard", stats, CACHE_TTL_DASHBOARD + 30)
-            
+
             # Latest orders (voor /api/orders/latest en frontpage)
             latest = await client.get_latest_orders(limit=50)
             cache.set("orders_latest:50", latest, CACHE_TTL_ORDERS + 30)
-            
+
             # Orders vandaag page info (voor paginering)
             _, today_info = await client.get_orders(created_after=today_str, limit=50, page=1)
             last_page = today_info.get("lastPage", 1)
-            
+
             # Pre-warm eerste + laatste pagina van vandaag
             if last_page > 1:
                 items_last, info_last = await client.get_orders(created_after=today_str, limit=50, page=last_page)
                 cache.set(f"orders:{None}:{today_str}:{last_page}:50", {"items": items_last, "page_info": info_last}, CACHE_TTL_ORDERS + 30)
-            
+
             # Latest shipments
             ship_latest = await client.get_latest_shipments(limit=50)
             cache.set("shipments_latest:50", ship_latest, CACHE_TTL_SHIPMENTS + 30)
-            
+
             # Inventory alerts
             alerts = await client.get_low_stock_products(threshold=25)
             cache.set("inventory_alerts", alerts, CACHE_TTL_INVENTORY + 30)
-            
+
         except Exception as e:
             print(f"Cache warm error: {e}")
-        
+
         await asyncio.sleep(45)
 
-@app.on_event("startup")
-async def startup_event():
-    global _warm_task
-    _warm_task = asyncio.create_task(warm_cache())
-    # Start AI insights scheduler
+
+# ============ LIFESPAN (startup + shutdown) ============
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager: startup en shutdown logica."""
+    # --- STARTUP ---
+    warm_task = asyncio.create_task(warm_cache())
+    print("[Startup] Cache pre-warming task gestart")
+
     try:
         setup_scheduler(app)
     except Exception as e:
         print(f"AI Scheduler setup failed (non-fatal): {e}")
+
+    yield
+
+    # --- SHUTDOWN ---
+    print("[Shutdown] Graceful shutdown gestart...")
+
+    # Cancel cache pre-warming task
+    warm_task.cancel()
+    try:
+        await warm_task
+    except asyncio.CancelledError:
+        pass
+    print("[Shutdown] Cache pre-warming gestopt")
+
+    # Close httpx client (GoedgepicktAPI)
+    try:
+        client = get_client()
+        if client._http_client and not client._http_client.is_closed:
+            await client._http_client.aclose()
+            print("[Shutdown] Goedgepickt httpx client gesloten")
+    except Exception as e:
+        print(f"[Shutdown] httpx client close error (non-fatal): {e}")
+
+
+# Initialize FastAPI
+app = FastAPI(
+    title="Dura Fulfilment Dashboard API",
+    description="Backend API voor het Dura Fulfilment management dashboard",
+    version="3.0.0",
+    lifespan=lifespan,
+)
 
 # CORS configuratie
 _default_origins = "https://klain.nl,https://www.klain.nl"
@@ -199,48 +273,76 @@ app.add_middleware(
     allow_headers=["Content-Type", "Accept", "X-API-Key", "Authorization"],
 )
 
-# ============ API KEY AUTHENTICATION ============
+# ============ AUTHENTICATION MIDDLEWARE ============
 
 DURA_API_KEY = os.getenv("DURA_API_KEY", "")
 
+# P1.3: Alleen deze paths accepteren POST requests
+POST_ALLOWED_PATHS = {"/api/auth/login", "/api/ai-insights/refresh"}
+
 @app.middleware("http")
-async def verify_api_key(request: Request, call_next):
-    """Middleware die X-API-Key header checkt op alle /api/* endpoints."""
+async def verify_auth(request: Request, call_next):
+    """Middleware die session token OF API key checkt op alle /api/* endpoints.
+    P1.1: Accepteert Bearer session tokens zodat frontend geen API key meer nodig heeft.
+    P1.3: Blokkeert POST op endpoints die alleen GET ondersteunen.
+    """
     path = request.url.path
 
     # Skip auth voor health checks, CORS preflight en auth endpoints
     if not path.startswith("/api/") or request.method == "OPTIONS" or path.startswith("/api/auth/"):
         return await call_next(request)
 
-    # Als geen API key geconfigureerd is, weiger alle /api/* requests
-    if not DURA_API_KEY:
-        print("[WARN] DURA_API_KEY not set - rejecting API request")
-        return JSONResponse(status_code=500, content={"success": False, "error": "Server configuration error"})
+    # P1.3: POST method whitelist — alleen specifieke endpoints accepteren POST
+    if request.method == "POST" and path not in POST_ALLOWED_PATHS:
+        client_ip = request.client.host if request.client else "unknown"
+        print(f"[AUTH] POST rejected: {path} from {client_ip}")
+        return JSONResponse(status_code=405, content={"success": False, "error": "Method not allowed"})
 
-    api_key = request.headers.get("X-API-Key", "")
-    if not api_key or not hmac.compare_digest(api_key, DURA_API_KEY):
-        return JSONResponse(status_code=401, content={"success": False, "error": "Unauthorized"})
+    # Auth optie 1: Geldig session token (Bearer header)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        payload = verify_session_token(token)
+        if payload:
+            print(f"[AUTH] Session token auth: {payload.get('email', '?')}")
+            return await call_next(request)
 
-    return await call_next(request)
+    # Auth optie 2: Geldige API key (backward compatibility + server-to-server)
+    if DURA_API_KEY:
+        api_key = request.headers.get("X-API-Key", "")
+        if api_key and hmac.compare_digest(api_key, DURA_API_KEY):
+            print("[AUTH] API key auth")
+            return await call_next(request)
+
+    return JSONResponse(status_code=401, content={"success": False, "error": "Unauthorized"})
 
 
 # ============ SESSION AUTH ENDPOINTS ============
 
 @app.post("/api/auth/login")
-async def auth_login(body: LoginRequest):
+async def auth_login(body: LoginRequest, request: Request):
     """Login met email + wachtwoord. Geeft signed session token terug."""
     if not SESSION_SECRET:
         print("[WARN] SESSION_SECRET not set - rejecting login")
         return JSONResponse(status_code=500, content={"success": False, "error": "Server configuration error"})
 
+    # Rate limiting: max 5 pogingen per 15 minuten per IP
+    client_ip = request.client.host if request.client else "unknown"
+    if login_limiter.is_limited(client_ip):
+        print(f"[AUTH] Rate limited: {client_ip}")
+        return JSONResponse(status_code=429, content={"success": False, "error": "Te veel inlogpogingen. Probeer het over 15 minuten opnieuw."})
+
     email = body.email.strip().lower()
     user = USERS.get(email)
     if not user:
+        login_limiter.record(client_ip)
         return JSONResponse(status_code=401, content={"success": False, "error": "Ongeldige inloggegevens"})
 
     if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+        login_limiter.record(client_ip)
         return JSONResponse(status_code=401, content={"success": False, "error": "Ongeldige inloggegevens"})
 
+    login_limiter.record(client_ip)
     token = create_session_token(email, user["name"])
     return {"success": True, "token": token, "user": {"email": email, "name": user["name"]}}
 
@@ -399,10 +501,411 @@ async def get_ai_insights():
 
 
 @app.post("/api/ai-insights/refresh")
-async def refresh_ai_insights():
-    """Forceer een nieuwe AI insights generatie."""
+async def refresh_ai_insights(request: Request):
+    """Forceer een nieuwe AI insights generatie. Vereist geldige sessie."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"success": False, "error": "Session vereist"})
+    payload = verify_session_token(auth_header[7:])
+    if not payload:
+        return JSONResponse(status_code=401, content={"success": False, "error": "Ongeldige sessie"})
+
+    print(f"[AI] Manual refresh triggered by {payload.get('email', '?')}")
     await generate_insights()
     return {"success": True, "data": get_cached_insights()}
+
+
+# ============ SLA METRICS ============
+
+def _calculate_sla_metrics(orders: list, sla_hours: int = 24) -> dict:
+    """Bereken SLA KPI's uit een lijst orders."""
+    now = datetime.now(tz=CET)
+    total = len(orders)
+    if total == 0:
+        return {
+            "on_time_shipping": {"percentage": 0, "on_time": 0, "late": 0, "sla_threshold_hours": sla_hours},
+            "order_accuracy": {"percentage": 0, "accurate": 0, "with_issues": 0},
+            "order_cycle_time": {"avg_minutes": 0, "median_minutes": 0, "p95_minutes": 0},
+            "perfect_order_rate": {"percentage": 0, "perfect": 0, "imperfect": 0},
+        }
+
+    on_time = 0
+    late = 0
+    accurate = 0
+    with_issues = 0
+    perfect = 0
+    cycle_times: list[float] = []
+
+    for order in orders:
+        create_date = order.get("createDate")
+        finish_date = order.get("finishDate")
+        status = order.get("status", "unknown")
+        attention = order.get("attentionNeeded") in (1, "1", True)
+
+        # Order Accuracy
+        if attention:
+            with_issues += 1
+        else:
+            accurate += 1
+
+        # Cycle time + On-Time Shipping
+        is_on_time = False
+        if create_date and finish_date:
+            try:
+                created = datetime.fromisoformat(create_date.replace("Z", "+00:00"))
+                finished = datetime.fromisoformat(finish_date.replace("Z", "+00:00"))
+                diff_minutes = (finished - created).total_seconds() / 60
+                if 0 < diff_minutes < 10080:  # Max 7 dagen
+                    cycle_times.append(diff_minutes)
+                    if diff_minutes <= sla_hours * 60:
+                        on_time += 1
+                        is_on_time = True
+                    else:
+                        late += 1
+            except (ValueError, TypeError):
+                pass
+        elif create_date and status in ("completed", "shipped", "delivered"):
+            # Afgerond maar geen finishDate — tel als on-time (data gap)
+            on_time += 1
+            is_on_time = True
+
+        # Perfect Order: on-time + accuraat + status afgerond
+        if is_on_time and not attention and status in ("completed", "shipped", "delivered"):
+            perfect += 1
+
+    # Cycle time statistieken
+    cycle_times.sort()
+    avg_ct = round(sum(cycle_times) / len(cycle_times), 1) if cycle_times else 0
+    median_ct = round(cycle_times[len(cycle_times) // 2], 1) if cycle_times else 0
+    p95_idx = int(len(cycle_times) * 0.95)
+    p95_ct = round(cycle_times[min(p95_idx, len(cycle_times) - 1)], 1) if cycle_times else 0
+
+    shipped_total = on_time + late
+    return {
+        "on_time_shipping": {
+            "percentage": round((on_time / shipped_total * 100), 1) if shipped_total > 0 else 0,
+            "on_time": on_time,
+            "late": late,
+            "sla_threshold_hours": sla_hours,
+        },
+        "order_accuracy": {
+            "percentage": round((accurate / total * 100), 1) if total > 0 else 0,
+            "accurate": accurate,
+            "with_issues": with_issues,
+        },
+        "order_cycle_time": {
+            "avg_minutes": avg_ct,
+            "median_minutes": median_ct,
+            "p95_minutes": p95_ct,
+        },
+        "perfect_order_rate": {
+            "percentage": round((perfect / total * 100), 1) if total > 0 else 0,
+            "perfect": perfect,
+            "imperfect": total - perfect,
+        },
+    }
+
+
+def _calc_trend(current: float, previous: float) -> str:
+    """Bereken trend: up, down, of stable (threshold 1%)."""
+    if previous == 0:
+        return "stable"
+    diff = current - previous
+    if diff > 1.0:
+        return "up"
+    elif diff < -1.0:
+        return "down"
+    return "stable"
+
+
+@app.get("/api/metrics/sla")
+async def get_sla_metrics(period: str = "week"):
+    """SLA KPI's: On-Time Shipping, Order Accuracy, Cycle Time, Perfect Order Rate."""
+    try:
+        if period not in ("today", "week", "month"):
+            raise HTTPException(status_code=400, detail="Period must be today, week, or month")
+
+        cache_key = f"sla_metrics:{period}"
+
+        async def fetch():
+            client = get_client()
+            now = datetime.now(tz=CET)
+
+            # Bepaal periodes
+            if period == "today":
+                start = now.strftime("%Y-%m-%d")
+                prev_start = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                prev_end = start
+            elif period == "week":
+                start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+                prev_start = (now - timedelta(days=now.weekday() + 7)).strftime("%Y-%m-%d")
+                prev_end = start
+            else:  # month
+                start = now.replace(day=1).strftime("%Y-%m-%d")
+                prev_month = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
+                prev_start = prev_month.strftime("%Y-%m-%d")
+                prev_end = start
+
+            # Haal orders op voor huidige en vorige periode (parallel)
+            async def fetch_period_orders(after: str, max_pages: int = 50):
+                items_first, pg_info = await client.get_orders(created_after=after, limit=50, page=1)
+                if not items_first:
+                    return []
+                all_orders = list(items_first)
+                last_page = pg_info.get("lastPage", 1)
+                if last_page > 1:
+                    tasks = [client.get_orders(created_after=after, limit=50, page=p)
+                             for p in range(2, min(last_page + 1, max_pages + 1))]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in results:
+                        if isinstance(r, tuple) and len(r) == 2:
+                            all_orders.extend(r[0])
+                return all_orders
+
+            async def fetch_today_count():
+                _, info = await client.get_orders(created_after=now.strftime("%Y-%m-%d"), limit=1, page=1)
+                return info.get("totalItems", 0)
+
+            async def fetch_yesterday_count():
+                _, info = await client.get_orders(created_after=(now - timedelta(days=1)).strftime("%Y-%m-%d"), limit=1, page=1)
+                today_count_est = (await client.get_orders(created_after=now.strftime("%Y-%m-%d"), limit=1, page=1))[1].get("totalItems", 0)
+                return info.get("totalItems", 0) - today_count_est
+
+            current_orders, prev_orders, today_count = await asyncio.gather(
+                fetch_period_orders(start),
+                fetch_period_orders(prev_start),
+                fetch_today_count(),
+            )
+
+            # Filter vorige periode orders (verwijder orders die in huidige periode vallen)
+            prev_orders = [o for o in prev_orders if o.get("createDate", "") < prev_end]
+
+            # Bereken metrics
+            current_metrics = _calculate_sla_metrics(current_orders)
+            prev_metrics = _calculate_sla_metrics(prev_orders)
+
+            # Voeg trends toe
+            for key in ("on_time_shipping", "order_accuracy", "perfect_order_rate"):
+                curr_pct = current_metrics[key]["percentage"]
+                prev_pct = prev_metrics[key]["percentage"]
+                current_metrics[key]["trend"] = _calc_trend(curr_pct, prev_pct)
+                current_metrics[key]["prev_percentage"] = prev_pct
+
+            # Cycle time trend (lager is beter, dus omgekeerd)
+            curr_avg = current_metrics["order_cycle_time"]["avg_minutes"]
+            prev_avg = prev_metrics["order_cycle_time"]["avg_minutes"]
+            ct_trend = _calc_trend(prev_avg, curr_avg)  # Omgekeerd: daling is "up" (verbetering)
+            current_metrics["order_cycle_time"]["trend"] = ct_trend
+            current_metrics["order_cycle_time"]["prev_avg_minutes"] = prev_avg
+
+            # Today vs yesterday
+            yesterday_count = max(0, len([o for o in prev_orders
+                                          if o.get("createDate", "").startswith((now - timedelta(days=1)).strftime("%Y-%m-%d"))]))
+            if yesterday_count == 0:
+                # Fallback: schat op basis van vorige periode gemiddelde
+                days_in_prev = max(1, (datetime.strptime(prev_end, "%Y-%m-%d") - datetime.strptime(prev_start, "%Y-%m-%d")).days)
+                yesterday_count = len(prev_orders) // days_in_prev if days_in_prev > 0 else 0
+
+            change_pct = round(((today_count - yesterday_count) / yesterday_count * 100), 1) if yesterday_count > 0 else 0
+
+            return {
+                "period": period,
+                "period_start": start,
+                "period_end": now.strftime("%Y-%m-%d"),
+                "total_orders": len(current_orders),
+                "metrics": current_metrics,
+                "today_vs_yesterday": {
+                    "orders_today": today_count,
+                    "orders_yesterday": yesterday_count,
+                    "trend": "up" if today_count > yesterday_count else "down" if today_count < yesterday_count else "stable",
+                    "change_percent": change_pct,
+                },
+            }
+
+        result = await cache.get_or_fetch(cache_key, CACHE_TTL_SLA, fetch)
+        return {
+            "success": True,
+            "data": result,
+            "cached": cache.get(cache_key) is not None,
+            "timestamp": datetime.now(tz=CET).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] get_sla_metrics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============ REPORT EXPORT ============
+
+@app.get("/api/reports/export")
+async def export_report(
+    request: Request,
+    format: str = "csv",
+    period: str = "week",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """Exporteer een rapport als CSV. Vereist geldige sessie."""
+    try:
+        if format not in ("csv",):
+            raise HTTPException(status_code=400, detail="Format must be csv")
+        if period not in ("week", "month", "custom"):
+            raise HTTPException(status_code=400, detail="Period must be week, month, or custom")
+
+        # Session auth check (extra naast middleware, voor logging)
+        auth_header = request.headers.get("Authorization", "")
+        user_email = "unknown"
+        if auth_header.startswith("Bearer "):
+            payload = verify_session_token(auth_header[7:])
+            if payload:
+                user_email = payload.get("email", "unknown")
+
+        client = get_client()
+        now = datetime.now(tz=CET)
+
+        # Bepaal periode
+        if period == "custom" and start_date and end_date:
+            p_start = start_date
+            p_end = end_date
+        elif period == "month":
+            p_start = now.replace(day=1).strftime("%Y-%m-%d")
+            p_end = now.strftime("%Y-%m-%d")
+        else:  # week
+            p_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+            p_end = now.strftime("%Y-%m-%d")
+
+        print(f"[REPORT] Export {format} {period} ({p_start} - {p_end}) by {user_email}")
+
+        # Haal orders op voor de periode
+        async def fetch_all_orders(after: str, max_pages: int = 50) -> list:
+            items_first, pg_info = await client.get_orders(created_after=after, limit=50, page=1)
+            if not items_first:
+                return []
+            all_items = list(items_first)
+            last_page = pg_info.get("lastPage", 1)
+            if last_page > 1:
+                tasks = [client.get_orders(created_after=after, limit=50, page=p)
+                         for p in range(2, min(last_page + 1, max_pages + 1))]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, tuple) and len(r) == 2:
+                        all_items.extend(r[0])
+            return all_items
+
+        # Haal data parallel op
+        async def fetch_shipments_period():
+            items, _ = await client.get_shipments(created_after=p_start, limit=50, page=1)
+            return items
+
+        orders, shipments = await asyncio.gather(
+            fetch_all_orders(p_start),
+            fetch_shipments_period(),
+        )
+
+        # Filter orders op einddatum als custom
+        if period == "custom" and end_date:
+            orders = [o for o in orders if o.get("createDate", "")[:10] <= end_date]
+
+        # Bereken SLA metrics
+        sla = _calculate_sla_metrics(orders)
+
+        # Bereken revenue
+        total_revenue = 0.0
+        for o in orders:
+            try:
+                total_revenue += float(o.get("totalPaid", "0") or "0")
+            except (ValueError, TypeError):
+                pass
+
+        # Orders per dag
+        orders_by_day: dict[str, dict] = {}
+        for o in orders:
+            day = o.get("createDate", "")[:10]
+            if not day:
+                continue
+            if day not in orders_by_day:
+                orders_by_day[day] = {"count": 0, "revenue": 0.0}
+            orders_by_day[day]["count"] += 1
+            try:
+                orders_by_day[day]["revenue"] += float(o.get("totalPaid", "0") or "0")
+            except (ValueError, TypeError):
+                pass
+
+        # Webshop verdeling
+        webshop_counts: dict[str, int] = {}
+        for o in orders:
+            shop = o.get("webshopName", "Onbekend")
+            webshop_counts[shop] = webshop_counts.get(shop, 0) + 1
+        top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Carrier verdeling
+        carrier_counts: dict[str, int] = {}
+        for s in shipments:
+            carrier = s.get("carrier", s.get("carrierName", "Onbekend"))
+            carrier_counts[carrier] = carrier_counts.get(carrier, 0) + 1
+        top_carriers = sorted(carrier_counts.items(), key=lambda x: x[1], reverse=True)
+
+        # Genereer CSV
+        output = io.StringIO()
+        output.write("\ufeff")  # BOM voor UTF-8 herkenning in Excel
+        writer = csv.writer(output, delimiter=";")  # Puntkomma voor NL Excel
+
+        # Sectie 1: Samenvatting
+        writer.writerow(["DURA FULFILMENT RAPPORT"])
+        writer.writerow(["Periode", f"{p_start} t/m {p_end}"])
+        writer.writerow(["Gegenereerd", now.strftime("%Y-%m-%d %H:%M")])
+        writer.writerow([])
+        writer.writerow(["SAMENVATTING"])
+        writer.writerow(["Totaal orders", len(orders)])
+        writer.writerow(["Totaal verzendingen", len(shipments)])
+        writer.writerow(["Omzet", f"{total_revenue:.2f}"])
+        writer.writerow([])
+        writer.writerow(["SLA METRICS"])
+        writer.writerow(["On-Time Shipping %", f"{sla['on_time_shipping']['percentage']}%"])
+        writer.writerow(["Order Accuracy %", f"{sla['order_accuracy']['percentage']}%"])
+        writer.writerow(["Gem. Doorlooptijd (min)", sla["order_cycle_time"]["avg_minutes"]])
+        writer.writerow(["Mediaan Doorlooptijd (min)", sla["order_cycle_time"]["median_minutes"]])
+        writer.writerow(["P95 Doorlooptijd (min)", sla["order_cycle_time"]["p95_minutes"]])
+        writer.writerow(["Perfect Order Rate %", f"{sla['perfect_order_rate']['percentage']}%"])
+        writer.writerow([])
+
+        # Sectie 2: Orders per dag
+        writer.writerow(["ORDERS PER DAG"])
+        writer.writerow(["Datum", "Aantal Orders", "Omzet"])
+        for day in sorted(orders_by_day.keys()):
+            d = orders_by_day[day]
+            writer.writerow([day, d["count"], f"{d['revenue']:.2f}"])
+        writer.writerow([])
+
+        # Sectie 3: Top webshops
+        writer.writerow(["TOP WEBSHOPS"])
+        writer.writerow(["Webshop", "Aantal Orders", "% van totaal"])
+        for name, count in top_webshops:
+            pct = round(count / len(orders) * 100, 1) if orders else 0
+            writer.writerow([name, count, f"{pct}%"])
+        writer.writerow([])
+
+        # Sectie 4: Carrier verdeling
+        writer.writerow(["CARRIER VERDELING"])
+        writer.writerow(["Carrier", "Aantal Verzendingen", "% van totaal"])
+        for name, count in top_carriers:
+            pct = round(count / len(shipments) * 100, 1) if shipments else 0
+            writer.writerow([name, count, f"{pct}%"])
+
+        # Return als streaming response
+        output.seek(0)
+        filename = f"dura-rapport-{period}-{p_end}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] export_report: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============ HEALTH CHECK ============
