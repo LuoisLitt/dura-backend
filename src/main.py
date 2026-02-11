@@ -181,41 +181,33 @@ CACHE_TTL_ACTIVE_INV = 2100 # 35 minuten (indexer draait elke 30 min)
 # ============ CACHE PRE-WARMING ============
 
 async def warm_cache():
-    """Achtergrond taak die cache elke 45s ververst zodat users altijd cached data krijgen."""
+    """Achtergrond taak die cache ververst. Interval 180s om rate limits te voorkomen."""
     while True:
         try:
             client = get_client()
-            today_str = datetime.now(tz=CET).strftime("%Y-%m-%d")
 
-            # Dashboard stats
+            # Dashboard stats (haalt orders, shipments, revenue, etc. op in 1 call)
+            print("[WarmCache] Fetching dashboard stats...", flush=True)
             stats = await client.get_dashboard_stats()
-            cache.set("dashboard", stats, CACHE_TTL_DASHBOARD + 30)
+            cache.set("dashboard", stats, CACHE_TTL_DASHBOARD + 60)
+            print(f"[WarmCache] Dashboard cached: {stats.get('orders', {}).get('today', '?')} orders today", flush=True)
 
-            # Latest orders (voor /api/orders/latest en frontpage)
+            # Wacht 5s om rate limit budget te laten herstellen
+            await asyncio.sleep(5)
+
+            # Latest orders (apart, licht: 1 API call)
             latest = await client.get_latest_orders(limit=50)
-            cache.set("orders_latest:50", latest, CACHE_TTL_ORDERS + 30)
+            cache.set("orders_latest:50", latest, CACHE_TTL_ORDERS + 60)
 
-            # Orders vandaag page info (voor paginering)
-            _, today_info = await client.get_orders(created_after=today_str, limit=50, page=1)
-            last_page = today_info.get("lastPage", 1)
-
-            # Pre-warm eerste + laatste pagina van vandaag
-            if last_page > 1:
-                items_last, info_last = await client.get_orders(created_after=today_str, limit=50, page=last_page)
-                cache.set(f"orders:{None}:{today_str}:{last_page}:50", {"items": items_last, "page_info": info_last}, CACHE_TTL_ORDERS + 30)
-
-            # Latest shipments
+            # Latest shipments (1 API call)
+            await asyncio.sleep(2)
             ship_latest = await client.get_latest_shipments(limit=50)
-            cache.set("shipments_latest:50", ship_latest, CACHE_TTL_SHIPMENTS + 30)
-
-            # Inventory alerts
-            alerts = await client.get_low_stock_products(threshold=25)
-            cache.set("inventory_alerts", alerts, CACHE_TTL_INVENTORY + 30)
+            cache.set("shipments_latest:50", ship_latest, CACHE_TTL_SHIPMENTS + 60)
 
         except Exception as e:
-            print(f"Cache warm error: {e}")
+            print(f"[WarmCache] Error: {e}", flush=True)
 
-        await asyncio.sleep(45)
+        await asyncio.sleep(180)  # 3 minuten (was 45s — veroorzaakte rate limiting)
 
 
 # ============ INVENTORY INDEXER ============
@@ -226,10 +218,10 @@ async def index_active_inventory():
     """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
     import sys
     global _inventory_status
-    print("[INVENTORY] Task started, waiting 10s before first run...", flush=True)
+    print("[INVENTORY] Task started, waiting 300s before first run (laat warm_cache eerst draaien)...", flush=True)
     sys.stdout.flush()
     _inventory_status["state"] = "waiting"
-    await asyncio.sleep(10)
+    await asyncio.sleep(300)  # 5 min wachten zodat warm_cache eerst kan draaien zonder rate limits
 
     while True:
         try:

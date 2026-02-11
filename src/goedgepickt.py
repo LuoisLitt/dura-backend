@@ -219,8 +219,8 @@ class GoedgepicktAPI:
             print(f"[INVENTORY] Done: {len(active)} active from 1 page in {elapsed}s", flush=True)
             return active
 
-        # Batch ophalen: 5 concurrent requests per batch, 1s pauze tussen batches
-        BATCH_SIZE = 5
+        # Batch ophalen: 2 concurrent requests per batch, 2s pauze (voorkom rate limits)
+        BATCH_SIZE = 2
         MAX_RETRIES = 3
 
         async def fetch_page_with_retry(page_num: int) -> list:
@@ -260,8 +260,8 @@ class GoedgepicktAPI:
                 elif isinstance(r, Exception):
                     errors += 1
 
-            # 1s pauze tussen batches
-            await asyncio.sleep(1.0)
+            # 2s pauze tussen batches (rate limit budget)
+            await asyncio.sleep(2.0)
 
             # Progress log elke 100 pagina's
             pages_done = batch_start + len(batch)
@@ -421,7 +421,7 @@ class GoedgepicktAPI:
             print(f"[Orders] webshopUuid test failed: {e}", flush=True)
 
         current_page = 2
-        BATCH_SIZE = 3
+        BATCH_SIZE = 2
         empty_count = 0
 
         while current_page <= max_pages and empty_count == 0:
@@ -445,7 +445,7 @@ class GoedgepicktAPI:
             current_page += BATCH_SIZE
             if batch_items == 0:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)
 
         print(f"[Orders] TOTAL: Fetched {len(all_orders)} orders, stopped at page {current_page-1} (API said lastPage={api_last_page}, totalItems={api_total})", flush=True)
         return all_orders
@@ -459,7 +459,7 @@ class GoedgepicktAPI:
 
         api_last_page = pg_info.get("lastPage", 1)
         current_page = 2
-        BATCH_SIZE = 3
+        BATCH_SIZE = 2
         empty_count = 0
 
         while current_page <= max_pages and empty_count == 0:
@@ -483,7 +483,7 @@ class GoedgepicktAPI:
             current_page += BATCH_SIZE
             if batch_items == 0:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)
 
         if len(all_shipments) > 50:
             print(f"[Dashboard] Fetched {len(all_shipments)} shipments (API said lastPage={api_last_page})", flush=True)
@@ -709,7 +709,7 @@ class GoedgepicktAPI:
                                     total += float(o.get("totalPaid", "0") or "0")
                                 except (ValueError, TypeError):
                                     pass
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1.5)
                 
                 print(f"[Dashboard] Week revenue: €{total:.2f} from {last_page} pages (parallel)")
                 return round(total, 2)
