@@ -223,7 +223,7 @@ async def warm_cache():
 async def index_active_inventory():
     """Achtergrond taak die elke 30 min alle producten met stock > 0 indexeert."""
     # Wacht 120s bij startup zodat warm_cache klaar is en rate limit afkoelt
-    print("[INVENTORY] Waiting 120s before first index run...")
+    print("[INVENTORY] Waiting 120s before first index run...", flush=True)
     await asyncio.sleep(120)
 
     while True:
@@ -231,9 +231,9 @@ async def index_active_inventory():
             client = get_client()
             active = await client.get_in_stock_products()
             cache.set("inventory_active", active, CACHE_TTL_ACTIVE_INV)
-            print(f"[INVENTORY] Cache updated: {len(active)} active products")
+            print(f"[INVENTORY] Cache updated: {len(active)} active products", flush=True)
         except Exception as e:
-            print(f"[INVENTORY] Index error: {e}")
+            print(f"[INVENTORY] Index error: {e}", flush=True)
 
         await asyncio.sleep(1800)  # 30 minuten
 
@@ -1115,7 +1115,7 @@ async def get_inventory(
             active = cache.get("inventory_active")
             if active is None:
                 # Index nog niet klaar — val terug op pass-through (1 pagina)
-                print("[INVENTORY] Cache not ready, falling back to pass-through")
+                print("[INVENTORY] Cache not ready, falling back to pass-through", flush=True)
                 client = get_client()
                 items, page_info = await client.get_products(limit=50, page=page)
                 return {

@@ -157,7 +157,7 @@ class GoedgepicktAPI:
     
     @staticmethod
     def _safe_stock(val) -> int:
-        """Convert stock value to int safely (API soms retourneert dict/str)."""
+        """Convert stock value to int safely (API retourneert dict/str/int)."""
         if isinstance(val, (int, float)):
             return int(val)
         if isinstance(val, str):
@@ -165,6 +165,12 @@ class GoedgepicktAPI:
                 return int(val)
             except ValueError:
                 return 0
+        if isinstance(val, dict):
+            # Goedgepickt retourneert stock als {"freeStock": N, "totalStock": N}
+            free = val.get("freeStock", val.get("totalStock", 0))
+            if isinstance(free, (int, float)):
+                return int(free)
+            return 0
         return 0
 
     async def get_in_stock_products(self, max_pages: int = 2500) -> list:
@@ -203,7 +209,7 @@ class GoedgepicktAPI:
 
         if last_page <= 1:
             elapsed = round(_time.monotonic() - start, 1)
-            print(f"[INVENTORY] Indexed {len(active)} active products from 1 page in {elapsed}s")
+            print(f"[INVENTORY] Indexed {len(active)} active products from 1 page in {elapsed}s", flush=True)
             return active
 
         # Sequentieel ophalen met korte pauze — Goedgepickt rate limit is streng
@@ -218,17 +224,17 @@ class GoedgepicktAPI:
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429:
                         wait = 3 * (attempt + 1)  # 3s, 6s, 9s
-                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s (attempt {attempt+1})")
+                        print(f"[INVENTORY] Page {page_num} rate limited, waiting {wait}s (attempt {attempt+1})", flush=True)
                         await asyncio.sleep(wait)
                         continue
-                    print(f"[INVENTORY] Page {page_num} HTTP {e.response.status_code}")
+                    print(f"[INVENTORY] Page {page_num} HTTP {e.response.status_code}", flush=True)
                     errors += 1
                     return []
                 except Exception as e:
-                    print(f"[INVENTORY] Page {page_num} error: {e}")
+                    print(f"[INVENTORY] Page {page_num} error: {e}", flush=True)
                     errors += 1
                     return []
-            print(f"[INVENTORY] Page {page_num} failed after {MAX_RETRIES} retries")
+            print(f"[INVENTORY] Page {page_num} failed after {MAX_RETRIES} retries", flush=True)
             errors += 1
             return []
 
@@ -242,13 +248,13 @@ class GoedgepicktAPI:
             # Progress log elke 200 pagina's
             if page_num % 200 == 0:
                 elapsed_so_far = round(_time.monotonic() - start, 1)
-                print(f"[INVENTORY] Progress: page {page_num}/{last_page}, {len(active)} active so far ({elapsed_so_far}s)")
+                print(f"[INVENTORY] Progress: page {page_num}/{last_page}, {len(active)} active so far ({elapsed_so_far}s)", flush=True)
 
         # Sorteer op stock (laagste eerst)
         active.sort(key=lambda p: p["stock"])
 
         elapsed = round(_time.monotonic() - start, 1)
-        print(f"[INVENTORY] Indexed {len(active)} active products from {last_page} pages ({total_api} total, {errors} errors) in {elapsed}s")
+        print(f"[INVENTORY] Indexed {len(active)} active products from {last_page} pages ({total_api} total, {errors} errors) in {elapsed}s", flush=True)
         return active
 
     async def get_low_stock_products(self, threshold: int = 25) -> list:
