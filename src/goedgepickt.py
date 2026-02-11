@@ -382,23 +382,50 @@ class GoedgepicktAPI:
             print(f"[SafeFetch] Failed ({type(e).__name__}): {e}")
             return fallback
 
-    async def _fetch_today_orders_all_pages(self, today_str: str, max_pages: int = 50) -> list:
-        """Haal alle orders van vandaag op (met page limit voor snelheid)."""
-        items_first, pg_info = await self.get_orders(created_after=today_str, limit=50, page=1)
+    async def _fetch_today_orders_all_pages(self, created_after: str, max_pages: int = 100) -> list:
+        """Haal alle orders op met batched parallel requests (5 tegelijk)."""
+        items_first, pg_info = await self.get_orders(created_after=created_after, limit=50, page=1)
         if not items_first:
             return []
-        last_page = pg_info.get("lastPage", 1)
+        last_page = min(pg_info.get("lastPage", 1), max_pages)
         all_orders = list(items_first)
-        
+
         if last_page > 1:
-            # Fetch remaining pages in parallel (max 5 concurrent)
-            remaining_pages = range(2, min(last_page + 1, max_pages + 1))
-            tasks = [self.get_orders(created_after=today_str, limit=50, page=p) for p in remaining_pages]
+            BATCH_SIZE = 5
+            pages = list(range(2, last_page + 1))
+            for batch_start in range(0, len(pages), BATCH_SIZE):
+                batch = pages[batch_start:batch_start + BATCH_SIZE]
+                tasks = [self.get_orders(created_after=created_after, limit=50, page=p) for p in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, tuple) and len(r) == 2:
+                        all_orders.extend(r[0])
+            print(f"[Dashboard] Fetched {len(all_orders)} orders from {last_page} pages")
+        return all_orders
+
+    async def _fetch_all_shipments(self, created_after: str, max_pages: int = 100) -> list:
+        """Haal alle shipments op met batched parallel requests (5 tegelijk)."""
+        items_first, pg_info = await self.get_shipments(created_after=created_after, limit=50, page=1)
+        if not items_first:
+            return []
+        last_page = min(pg_info.get("lastPage", 1), max_pages)
+        all_shipments = list(items_first)
+
+        if last_page <= 1:
+            return all_shipments
+
+        BATCH_SIZE = 5
+        pages = list(range(2, last_page + 1))
+        for batch_start in range(0, len(pages), BATCH_SIZE):
+            batch = pages[batch_start:batch_start + BATCH_SIZE]
+            tasks = [self.get_shipments(created_after=created_after, limit=50, page=p) for p in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, tuple) and len(r) == 2:
-                    all_orders.extend(r[0])
-        return all_orders
+                    all_shipments.extend(r[0])
+
+        print(f"[Dashboard] Fetched {len(all_shipments)} shipments from {last_page} pages")
+        return all_shipments
 
     async def get_dashboard_stats(self) -> dict:
         """Verzamel alle statistieken voor het dashboard. Parallel waar mogelijk."""
@@ -434,8 +461,26 @@ class GoedgepicktAPI:
             return info.get("totalItems", 0)
         
         async def fetch_today_orders():
-            return await self._fetch_today_orders_all_pages(today_str, max_pages=50)
-        
+            return await self._fetch_today_orders_all_pages(today_str, max_pages=100)
+
+        async def fetch_processed_count():
+            """Exacte processed count via status-specifieke API queries."""
+            statuses = ["shipped", "completed", "delivered"]
+            tasks = [self.get_orders(created_after=today_str, status=s, limit=1, page=1) for s in statuses]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            total = 0
+            by_status = {}
+            for s, r in zip(statuses, results):
+                if isinstance(r, tuple) and len(r) == 2:
+                    count = r[1].get("totalItems", 0)
+                    total += count
+                    by_status[s] = count
+            return total, by_status
+
+        async def fetch_today_shipments_all():
+            """Alle shipments van vandaag voor carrier verdeling."""
+            return await self._fetch_all_shipments(today_str, max_pages=50)
+
         # Alles parallel
         (
             orders_today_count,
@@ -445,6 +490,8 @@ class GoedgepicktAPI:
             shipments_week_count,
             prev_ship_total,
             today_orders_sample,
+            processed_result,
+            today_shipments,
         ) = await asyncio.gather(
             self._safe_fetch(fetch_today_count(), fallback=0),
             self._safe_fetch(fetch_week_count(), fallback=0),
@@ -452,11 +499,19 @@ class GoedgepicktAPI:
             self._safe_fetch(fetch_ship_today(), fallback=0),
             self._safe_fetch(fetch_ship_week(), fallback=0),
             self._safe_fetch(fetch_prev_ship(), fallback=0),
-            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=15.0),
+            self._safe_fetch(fetch_today_orders(), fallback=[], timeout_sec=60.0),
+            self._safe_fetch(fetch_processed_count(), fallback=(0, {})),
+            self._safe_fetch(fetch_today_shipments_all(), fallback=[], timeout_sec=60.0),
         )
         
         prev_week_orders = max(0, (prev_week_total or 0) - (orders_week_count or 0))
         prev_week_shipments = max(0, (prev_ship_total or 0) - (shipments_week_count or 0))
+
+        # Unpack exacte processed count van status-specifieke API queries
+        if isinstance(processed_result, tuple):
+            processed_exact, processed_by_status = processed_result
+        else:
+            processed_exact, processed_by_status = 0, {}
         
         # ========== FASE 2: Bereken stats uit opgehaalde data (CPU only, geen API) ==========
         orders_by_status = {}
@@ -511,8 +566,30 @@ class GoedgepicktAPI:
         top_webshops = sorted(webshop_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         top_webshops_list = [{"name": name, "count": count} for name, count in top_webshops]
         
-        processed_statuses = {"shipped", "completed", "delivered"}
-        processed_orders = sum(count for s, count in orders_by_status.items() if s in processed_statuses)
+        # Gebruik exacte API count voor processed orders (niet sample-based)
+        if processed_exact > 0:
+            processed_orders = processed_exact
+            for s, c in processed_by_status.items():
+                orders_by_status[s] = c
+        else:
+            processed_statuses = {"shipped", "completed", "delivered"}
+            processed_orders = sum(count for s, count in orders_by_status.items() if s in processed_statuses)
+
+        # Carrier verdeling uit alle shipments van vandaag (genormaliseerd)
+        carrier_counts = {}
+        for s in (today_shipments or []):
+            raw = (s.get("shippingMethod") or s.get("shippingCarrier")
+                   or s.get("carrier") or s.get("carrierName") or "Onbekend").lower()
+            if "dhl" in raw:
+                cname = "DHL"
+            elif "postnl" in raw or "tnt" in raw:
+                cname = "PostNL"
+            elif "dpd" in raw:
+                cname = "DPD"
+            else:
+                cname = raw[:20].title() if raw else "Onbekend"
+            carrier_counts[cname] = carrier_counts.get(cname, 0) + 1
+        top_carriers = sorted(carrier_counts.items(), key=lambda x: x[1], reverse=True)
         
         # ========== FASE 3: Week revenue + orders per dag (parallel) ==========
         # Week revenue
@@ -574,7 +651,18 @@ class GoedgepicktAPI:
         day_results = await asyncio.gather(
             *[self._safe_fetch(fetch_day_count(d), fallback=(d, 0)) for d in day_strs]
         )
-        orders_per_day = {d: c for d, c in day_results if d is not None}
+        cumulative_counts = {d: c for d, c in day_results if d is not None}
+
+        # Bereken per-dag aantallen (verschil opeenvolgende cumulatieve totalen)
+        sorted_days = sorted(cumulative_counts.keys())
+        orders_per_day = {}
+        for i, day in enumerate(sorted_days):
+            if i < len(sorted_days) - 1:
+                next_day = sorted_days[i + 1]
+                orders_per_day[day] = max(0, cumulative_counts[day] - cumulative_counts[next_day])
+            else:
+                # Laatste dag (vandaag): cumulatief getal IS het dagaantal
+                orders_per_day[day] = cumulative_counts[day]
         
         return {
             "orders": {
@@ -585,7 +673,9 @@ class GoedgepicktAPI:
             },
             "shipments": {
                 "today": shipments_today_count or 0,
-                "week": shipments_week_count or 0
+                "week": shipments_week_count or 0,
+                "by_carrier": carrier_counts,
+                "top_carriers": [{"name": name, "count": count} for name, count in top_carriers[:10]],
             },
             "orders_per_day": orders_per_day,
             "revenue": {

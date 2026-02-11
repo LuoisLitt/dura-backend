@@ -838,30 +838,10 @@ async def export_report(
 
         print(f"[REPORT] Export {format} {period} ({p_start} - {p_end}) by {user_email}")
 
-        # Haal orders op voor de periode
-        async def fetch_all_orders(after: str, max_pages: int = 50) -> list:
-            items_first, pg_info = await client.get_orders(created_after=after, limit=50, page=1)
-            if not items_first:
-                return []
-            all_items = list(items_first)
-            last_page = pg_info.get("lastPage", 1)
-            if last_page > 1:
-                tasks = [client.get_orders(created_after=after, limit=50, page=p)
-                         for p in range(2, min(last_page + 1, max_pages + 1))]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, tuple) and len(r) == 2:
-                        all_items.extend(r[0])
-            return all_items
-
-        # Haal data parallel op
-        async def fetch_shipments_period():
-            items, _ = await client.get_shipments(created_after=p_start, limit=50, page=1)
-            return items
-
+        # Haal data parallel op (batched voor betrouwbaarheid)
         orders, shipments = await asyncio.gather(
-            fetch_all_orders(p_start),
-            fetch_shipments_period(),
+            client._fetch_today_orders_all_pages(p_start, max_pages=100),
+            client._fetch_all_shipments(p_start, max_pages=100),
         )
 
         # Filter orders op einddatum als custom
